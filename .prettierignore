@@ -1,0 +1,13 @@
+node_modules
+dist
+docs
+generated
+coverage
+.env
+prisma
+.gitignore
+nodemon.json
+prisma.config.js
+prisma.config.ts
+readme.md
+
