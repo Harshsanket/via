@@ -78,8 +78,10 @@ docker-data/
 # =========================
 prisma/migrations/
 
+# =========================
+# Files & Folders
+# =========================
 docs/
 test/
 .gitignore
 /generated/prisma
-.prettierrc
