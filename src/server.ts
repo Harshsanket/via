@@ -68,7 +68,9 @@ const shutdownServer = async (signal: string): Promise<void> => {
     logger.info(`[REDIS] :: [${signal}] received :: Closing client connection`);
     await redisClient.quit();
 
-    logger.info(`[PRISMA] :: [${signal}] received :: Disconnecting db connection`);
+    logger.info(
+      `[PRISMA] :: [${signal}] received :: Disconnecting db connection`,
+    );
     await prisma.$disconnect();
 
     // finall call

@@ -1,0 +1,1 @@
+export const SESSION_TTL: number = 60 * 10;
