@@ -3,7 +3,6 @@ import { logger } from "../../utils/logger.js";
 import { createSession, isSessionExist } from "../redis/service.js";
 
 export const handleSessions = (io: Server, socket: Socket) => {
-
   // create session
   socket.on("create-session", async (callback) => {
     if (typeof callback !== "function") return;
@@ -23,7 +22,6 @@ export const handleSessions = (io: Server, socket: Socket) => {
 
   // join session
   socket.on("join-session", async ({ sessionID }, callback) => {
-    
     // check callback
     if (typeof callback !== "function") return;
     const room = io.sockets.adapter.rooms.get(sessionID);

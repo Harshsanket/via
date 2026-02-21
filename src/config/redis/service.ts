@@ -1,6 +1,6 @@
 import { redisClient } from "./index.js";
 import { logger } from "../../utils/logger.js";
-import {SessionStatus} from "./types.js"
+import { SessionStatus } from "./types.js";
 import { SESSION_TTL } from "./constants.js";
 
 // create session
