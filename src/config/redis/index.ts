@@ -3,7 +3,7 @@ import { logger } from "../../utils/logger.js";
 
 export const redisClient = createClient({ url: process.env.REDIS_URL });
 
-export const connectRedis = async () => {
+export const connectRedis = async (): Promise<void> => {
   try {
     logger.info(`[REDIS] :: Connecting to client...`);
 
