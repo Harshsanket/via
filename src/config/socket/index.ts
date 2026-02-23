@@ -4,8 +4,8 @@ import { logger } from "../../utils/logger.js";
 import { handleSessions } from "./session.js";
 import { cleanupOnDisconnect } from "../redis/service.js";
 
-export const initSocket = (io: Server) => {
-  io.on("connection", (socket: Socket) => {
+export const initSocket = (io: Server): void => {
+  io.on("connection", (socket: Socket): void => {
     logger.info(`[SOCKET] :: [CONNECTED] peer :: ${socket.id}`);
 
     // session
@@ -18,7 +18,9 @@ export const initSocket = (io: Server) => {
       logger.warn(
         `[SOCKET] :: [DISCONNECTED] CONNECTION by peer :: ${socket.id}`,
       );
-      cleanupOnDisconnect(socket.id);
+
+      // cleanup
+      await cleanupOnDisconnect(socket.id);
     });
   });
 };

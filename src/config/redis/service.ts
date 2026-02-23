@@ -6,7 +6,9 @@ import {
   SessionID,
   PeerID,
   RedisSession,
-  SocketId,
+  MaxAllowedPeers,
+  CurrentPeers,
+  CheckSession,
 } from "./types.js";
 import { SESSION_TTL, REFRESH_SESSION_TTL } from "./constants.js";
 
@@ -20,9 +22,9 @@ export const createSession = async (
 
   const session: RedisSession = {
     createdBy: PEER_KEY,
+    connectedPeers: "0",
     maxAllowedPeers: "2",
     status: SessionStatus.WAITING,
-    connectedPeers: "0",
     createdAt: Date.now().toString(),
     lastActivity: Date.now().toString(),
   };
@@ -35,36 +37,102 @@ export const createSession = async (
     // session expiry
     await redisClient.expire(SESSION_KEY, SESSION_TTL);
   } catch (error) {
-    logger.error(`[REDIS] :: ERROR WHILE CREATING SESSION :: ${error}`);
+    logger.error(`[REDIS] :: ERROR WHILE STORING SESSION :: ${error}`);
   }
 };
 
 // check session
 export const isSessionExist = async (
-  sessionID: string | null,
+  sessionID: SessionID,
 ): Promise<boolean> => {
-  if (!sessionID) return false;
+  if (!sessionID) {
+    logger.error(`[REDIS] :: ERROR NO SESSION ID :: isSessionExist`);
+    return false;
+  }
   return (await redisClient.exists(sessionID)) === 1;
 };
 
-// get session
-export const getSocketSession = async (
-  socketId: SocketId,
-): Promise<string | null | void> => {
-  if (!socketId) {
-    logger.error(`[REDIS] :: ERROR GETTING SESSION`);
-    return;
+// join session
+export const joinSession = async (sessionID: SessionID): Promise<boolean> => {
+  // check session id
+  if (!sessionID) {
+    logger.error(`[REDIS] :: ERROR NO SESSION ID :: JOIN SESSION`);
+    return false;
+  }
+  try {
+    // check session
+    let checkSession: CheckSession =
+      (await redisClient.exists(sessionID)) === 1;
+    if (!checkSession) return false;
+
+    // get max allowed peers
+    let maxAllowedPeers: MaxAllowedPeers = await redisClient.hGet(
+      sessionID,
+      "maxAllowedPeers",
+    );
+    if (!maxAllowedPeers) return false;
+    maxAllowedPeers = Number(maxAllowedPeers);
+
+    // get current peers
+    let currentPeers: CurrentPeers = await redisClient.hGet(
+      sessionID,
+      "connectedPeers",
+    );
+    if (!currentPeers) return false;
+    currentPeers = Number(currentPeers);
+
+    if (currentPeers < maxAllowedPeers) {
+      await redisClient.hIncrBy(sessionID, "connectedPeers", 1);
+    }
+
+    return true;
+  } catch (error) {
+    logger.error(`[REDIS] :: ERROR JOINING SESSION :: ${error}`);
+    return false;
+  }
+};
+
+// decrease peers count
+export const decreasePeersCount = async (
+  sessionID: SessionID,
+): Promise<boolean> => {
+  if (!sessionID) {
+    logger.error(`[REDIS] :: ERROR NO SESSION ID :: JOIN SESSION`);
+    return false;
   }
 
   try {
-    return await redisClient.get(socketId);
+    // check session
+    let checkSession: CheckSession =
+      (await redisClient.exists(sessionID)) === 1;
+    if (!checkSession) return false;
+
+    await redisClient.hIncrBy(sessionID, "connectedPeers", -1);
+    return true;
   } catch (error) {
-    logger.error(`[REDIS] :: ERROR WHILE GETTING SESSION :: ${error}`);
+    logger.error(`[REDIS] :: ERROR DECREASING PEER COUNT :: ${error}`);
+    return false;
+  }
+};
+
+// get connected peers
+export const getConnectedPeers = async (
+  sessionID: string,
+): Promise<number | null> => {
+  try {
+    const count = await redisClient.hGet(sessionID, "connectedPeers");
+
+    return count ? Number(count) : 0;
+  } catch (error) {
+    logger.error(`[REDIS] :: ERROR GETTING ROOM SIZE :: ${error}`);
+    return null;
   }
 };
 
 // refresh ttl
-export const refreshSession = async (sessionId: SessionID): Promise<void> => {
+export const refreshSessionTTL = async (
+  sessionId: SessionID,
+): Promise<void> => {
   if (!sessionId) {
     logger.error(`[REDIS] :: ERROR GETTING SESSION`);
     return;
@@ -77,6 +145,19 @@ export const refreshSession = async (sessionId: SessionID): Promise<void> => {
   }
 };
 
+// change transfer status
+export const changeTransferStatus = async (
+  sessionID: SessionID,
+  status: SessionStatus,
+): Promise<void> => {
+  try {
+    await redisClient.hSet(sessionID, "status", status.toLowerCase());
+  } catch (error) {
+    logger.error(`[REDIS] :: ERROR UPDATING TRANSFER STATUS :: ${error}`);
+    throw error;
+  }
+};
+
 // delete session
 export const deleteSession = async (sessionId: SessionID): Promise<void> => {
   if (!sessionId) {
@@ -85,6 +166,7 @@ export const deleteSession = async (sessionId: SessionID): Promise<void> => {
   }
 
   try {
+    await redisClient.hIncrBy(sessionId, "createdSessions", -1);
     await redisClient.del(sessionId);
   } catch (error) {
     logger.error(`[REDIS] :: ERROR WHILE DELETING SESSION :: ${error}`);
