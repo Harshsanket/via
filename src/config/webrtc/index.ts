@@ -8,79 +8,94 @@ import {
 import { SessionStatus } from "../../config/redis/types.js";
 
 export function handleWebRTC(io: Server, socket: Socket): void {
-  // WEBRTC OFFER
-  socket.on("offer", async ({ sessionID, offer }) => {
-    // check sessionID and offer
-    if (!sessionID || typeof sessionID !== "string" || !offer) {
+  // OFFER
+  socket.on("offer", async ({ sessionId, offer }) => {
+    // check sessionId and offer
+    if (!sessionId || typeof sessionId !== "string" || !offer) {
       return socket.emit("error", { message: "Offer invalid" });
     }
 
     // get session info
-    try {
-      const session = await isSessionExist(sessionID);
-      if (!session)
-        return socket.emit("error", { message: "Session expired or invalid" });
-    } catch (error) {
-      logger.error(`[REDIS] :: Error fetching session ${sessionID} :: WEB RTC`);
-      logger.error(`[WEB RTC] :: ERROR GETTING SESSION :: ${sessionID}`);
-      return socket.emit("error", { message: "Session expired or invalid" });
+    const session = await isSessionExist(sessionId);
+    if (!session) {
+      logger.error(`[WEB RTC] :: ERROR GETTING SESSION :: ${sessionId}`);
+      return socket.emit("error", {
+        message: "Session expired or invalid",
+      });
     }
+
     // fwd to peer
-    socket.to(sessionID).emit("offer", { offer });
-    logger.info(`[WEB RTC] :: OFFER FORWARDED TO SESSION :: ${sessionID}`);
+    socket.to(sessionId).emit("offer", { offer });
+    logger.info(`[WEB RTC] :: OFFER FORWARDED TO SESSION :: ${sessionId}`);
   });
 
-  // WEBRTC ANSWER
-  socket.on("answer", ({ sessionID, answer }) => {
-    logger.info(`[SOCKET] :: ANSWER FORWARDED to session :: ${sessionID}`);
-    socket.to(sessionID).emit("answer", { answer });
+  // ANSWER
+  socket.on("answer", async ({ sessionId, answer }) => {
+    const session = await isSessionExist(sessionId);
+    if (!session) {
+      logger.error(`[WEB RTC] :: ERROR GETTING SESSION :: ${sessionId}`);
+      return socket.emit("error", {
+        message: "Session expired or invalid",
+      });
+    }
+
+    logger.info(`[SOCKET] :: ANSWER FORWARDED to session :: ${sessionId}`);
+    socket.to(sessionId).emit("answer", { answer });
   });
 
   // ICE CANDIDATE
-  socket.on("ice-candidate", ({ sessionID, candidate }) => {
-    socket.to(sessionID).emit("ice-candidate", { candidate });
+  socket.on("ice-candidate", async ({ sessionId, candidate }) => {
+    const session = await isSessionExist(sessionId);
+    if (!session) {
+      logger.error(`[WEB RTC] :: ERROR GETTING SESSION :: ${sessionId}`);
+      return socket.emit("error", {
+        message: "Session expired or invalid",
+      });
+    }
+
+    socket.to(sessionId).emit("ice-candidate", { candidate });
   });
 
-  // transfer progress
-  socket.on("transfer-complete", async ({ sessionID, fileName }) => {
+  // completion
+  socket.on("transfer-complete", async ({ sessionId, fileName }) => {
     try {
-      await changeTransferStatus(sessionID, SessionStatus.COMPLETED);
+      await changeTransferStatus(sessionId, SessionStatus.COMPLETED);
     } catch (error) {
       logger.error(
-        `[REDIS] :: Error changing session status ${sessionID} :: WEB RTC`,
+        `[REDIS] :: Error changing session status ${sessionId} :: WEB RTC`,
       );
     }
 
     logger.info(
-      `[SOCKET] :: FILE :: [${fileName}] Transfer complete by session :: ${sessionID}`,
+      `[SOCKET] :: FILE :: [${fileName}] Transfer complete by session :: ${sessionId}`,
     );
-    socket.to(sessionID).emit("transfer-complete", { fileName });
+    socket.to(sessionId).emit("transfer-complete", { fileName });
   });
 
-  socket.on("transfer-error", async ({ sessionID, message }) => {
+  // error
+  socket.on("transfer-error", async ({ sessionId, message }) => {
     try {
-      await changeTransferStatus(sessionID, SessionStatus.ERROR);
+      await changeTransferStatus(sessionId, SessionStatus.ERROR);
     } catch (error) {
       logger.error(
-        `[REDIS] :: Error changing session status ${sessionID} :: WEB RTC`,
+        `[REDIS] :: Error changing session status ${sessionId} :: WEB RTC`,
       );
     }
 
-    logger.warn(
-      `[SOCKET] :: Transfer error occured by session :: ${sessionID} with  message :: ${message}`,
+    logger.error(
+      `[SOCKET] :: Transfer error occured by session :: ${sessionId} with  message :: ${message}`,
     );
 
-    decreasePeersCount(sessionID);
-    socket.to(sessionID).emit("error", { message });
+    socket.to(sessionId).emit("error", { message });
   });
 
-  // peer disconneted
+  // disconneting
   socket.on("disconnecting", async () => {
     for (const roomId of socket.rooms) {
       if (roomId === socket.id) continue;
 
       try {
-        await changeTransferStatus(roomId, SessionStatus.ERROR);
+        await decreasePeersCount(roomId);
       } catch (error) {
         logger.error(
           `[REDIS] :: Error changing session status ${roomId} :: WEB RTC`,
@@ -90,7 +105,6 @@ export function handleWebRTC(io: Server, socket: Socket): void {
       logger.warn(
         `[SOCKET] :: Peer :: ${socket.id} [DISCONNECTED] session :: ${roomId}`,
       );
-      decreasePeersCount(roomId);
       socket.to(roomId).emit("peer-left");
     }
   });

@@ -3,7 +3,7 @@ import { logger } from "../../utils/logger.js";
 
 import {
   SessionStatus,
-  SessionID,
+  sessionId,
   PeerID,
   RedisSession,
   MaxAllowedPeers,
@@ -12,12 +12,12 @@ import {
 } from "./types.js";
 import { SESSION_TTL, REFRESH_SESSION_TTL } from "./constants.js";
 
-// create session
+// create session - [socket] session.ts -> [handleSessions] -> [create-session]
 export const createSession = async (
-  sessionID: SessionID,
+  sessionId: sessionId,
   peer: PeerID,
 ): Promise<void> => {
-  const SESSION_KEY: SessionID = sessionID;
+  const SESSION_KEY: sessionId = sessionId;
   const PEER_KEY: PeerID = peer;
 
   const session: RedisSession = {
@@ -37,132 +37,227 @@ export const createSession = async (
     // session expiry
     await redisClient.expire(SESSION_KEY, SESSION_TTL);
   } catch (error) {
-    logger.error(`[REDIS] :: ERROR WHILE STORING SESSION :: ${error}`);
+    logger.error(
+      `[REDIS] :: [createSession] :: ERROR WHILE STORING SESSION :: ${error}`,
+    );
+    throw error;
   }
 };
 
-// check session
-export const isSessionExist = async (
-  sessionID: SessionID,
-): Promise<boolean> => {
-  if (!sessionID) {
-    logger.error(`[REDIS] :: ERROR NO SESSION ID :: isSessionExist`);
-    return false;
-  }
-  return (await redisClient.exists(sessionID)) === 1;
-};
-
-// join session
-export const joinSession = async (sessionID: SessionID): Promise<boolean> => {
+// join session - [socket] session.ts -> [handleSessions] -> [join-session]
+export const joinSession = async (sessionId: sessionId): Promise<void> => {
   // check session id
-  if (!sessionID) {
-    logger.error(`[REDIS] :: ERROR NO SESSION ID :: JOIN SESSION`);
-    return false;
+  if (!sessionId) {
+    logger.error(
+      `[REDIS] :: [joinSession] :: [sessionId] :: SESSION ID INVALID`,
+    );
+    throw new Error("SessionId invalid");
   }
+
   try {
     // check session
     let checkSession: CheckSession =
-      (await redisClient.exists(sessionID)) === 1;
-    if (!checkSession) return false;
+      (await redisClient.exists(sessionId)) === 1;
+    if (!checkSession) {
+      logger.error(
+        `[REDIS] :: [joinSession] :: [checkSession] :: SESSION NOT FOUND`,
+      );
+      throw new Error("Session does not exist");
+    }
 
     // get max allowed peers
     let maxAllowedPeers: MaxAllowedPeers = await redisClient.hGet(
-      sessionID,
+      sessionId,
       "maxAllowedPeers",
     );
-    if (!maxAllowedPeers) return false;
+    if (!maxAllowedPeers) {
+      logger.error(
+        `[REDIS] :: [joinSession] :: [maxAllowedPeers] :: MAX ALLOWED NOT FOUND`,
+      );
+      throw new Error("Max allowed peer does not exist");
+    }
     maxAllowedPeers = Number(maxAllowedPeers);
 
     // get current peers
     let currentPeers: CurrentPeers = await redisClient.hGet(
-      sessionID,
+      sessionId,
       "connectedPeers",
     );
-    if (!currentPeers) return false;
+    if (!currentPeers) {
+      logger.error(
+        `[REDIS] :: [joinSession] :: [currentPeers] :: CURRENT PEER NOT FOUND`,
+      );
+      throw new Error("Current peer does not exist");
+    }
+
     currentPeers = Number(currentPeers);
 
     if (currentPeers < maxAllowedPeers) {
-      await redisClient.hIncrBy(sessionID, "connectedPeers", 1);
+      await redisClient.hIncrBy(sessionId, "connectedPeers", 1);
     }
-
-    return true;
   } catch (error) {
     logger.error(`[REDIS] :: ERROR JOINING SESSION :: ${error}`);
-    return false;
+    throw error;
   }
 };
 
-// decrease peers count
-export const decreasePeersCount = async (
-  sessionID: SessionID,
-): Promise<boolean> => {
-  if (!sessionID) {
-    logger.error(`[REDIS] :: ERROR NO SESSION ID :: JOIN SESSION`);
-    return false;
-  }
-
-  try {
-    // check session
-    let checkSession: CheckSession =
-      (await redisClient.exists(sessionID)) === 1;
-    if (!checkSession) return false;
-
-    await redisClient.hIncrBy(sessionID, "connectedPeers", -1);
-    return true;
-  } catch (error) {
-    logger.error(`[REDIS] :: ERROR DECREASING PEER COUNT :: ${error}`);
-    return false;
-  }
-};
-
-// get connected peers
-export const getConnectedPeers = async (
-  sessionID: string,
-): Promise<number | null> => {
-  try {
-    const count = await redisClient.hGet(sessionID, "connectedPeers");
-
-    return count ? Number(count) : 0;
-  } catch (error) {
-    logger.error(`[REDIS] :: ERROR GETTING ROOM SIZE :: ${error}`);
-    return null;
-  }
-};
-
-// refresh ttl
+// refresh ttl - [socket] session.ts -> [handleSessions] -> [join-session]
 export const refreshSessionTTL = async (
-  sessionId: SessionID,
+  sessionId: sessionId,
 ): Promise<void> => {
   if (!sessionId) {
-    logger.error(`[REDIS] :: ERROR GETTING SESSION`);
-    return;
+    logger.error(
+      `[REDIS] :: [refreshSessionTTL] :: [sessionId] :: SESSION ID INVALID`,
+    );
+    throw new Error("SessionId invalid");
   }
 
   try {
     await redisClient.expire(sessionId, REFRESH_SESSION_TTL);
   } catch (error) {
     logger.error(`[REDIS] :: ERROR WHILE REFRESHING SESSION :: ${error}`);
+    throw error;
   }
 };
 
-// change transfer status
+// check session - [webrtc] -> [handleWebRTC] -> [offer] [answer] [ice-candidate]
+export const isSessionExist = async (
+  sessionId: sessionId,
+): Promise<boolean> => {
+  if (!sessionId) {
+    logger.error(
+      `[REDIS] :: [isSessionExist] :: [sessionId] :: SESSION ID INVALID`,
+    );
+    throw new Error("SessionId invalid");
+  }
+  return (await redisClient.exists(sessionId)) === 1;
+};
+
+// change transfer status - [webrtc] -> [handleWebRTC] -> [transfer-complete] [transfer-error]
 export const changeTransferStatus = async (
-  sessionID: SessionID,
+  sessionId: sessionId,
   status: SessionStatus,
 ): Promise<void> => {
+  if (!sessionId) {
+    logger.error(
+      `[REDIS] :: [changeTransferStatus] :: [sessionId] :: SESSION ID INVALID`,
+    );
+    throw new Error("SessionId invalid");
+  }
+
   try {
-    await redisClient.hSet(sessionID, "status", status.toLowerCase());
+    await redisClient.hSet(sessionId, "status", status.toLowerCase());
   } catch (error) {
     logger.error(`[REDIS] :: ERROR UPDATING TRANSFER STATUS :: ${error}`);
     throw error;
   }
 };
 
-// delete session
-export const deleteSession = async (sessionId: SessionID): Promise<void> => {
+// decrease peers count - [webrtc] -> [handleWebRTC] -> [disconnecting]
+export const decreasePeersCount = async (
+  sessionId: sessionId,
+): Promise<void> => {
   if (!sessionId) {
-    logger.error(`[REDIS] :: ERROR GETTING SESSION`);
-    return;
+    logger.error(
+      `[REDIS] :: [decreasePeersCount] :: [sessionId] :: SESSION ID INVALID`,
+    );
+    throw new Error("SessionId invalid");
+  }
+
+  try {
+    // check session
+    let checkSession: CheckSession =
+      (await redisClient.exists(sessionId)) === 1;
+    if (!checkSession) {
+      logger.error(
+        `[REDIS] :: [decreasePeersCount] :: [checkSession] :: SESSION NOT FOUND`,
+      );
+      throw new Error("Session does not exist");
+    }
+
+    const count = await redisClient.hGet(sessionId, "connectedPeers");
+    const currentCount = count ? Number(count) : 0;
+
+    if (currentCount > 0)
+      await redisClient.hIncrBy(sessionId, "connectedPeers", -1);
+
+    logger.info(`[REDIS] :: DECREASING PEER COUNT for session :: ${sessionId}`);
+  } catch (error) {
+    logger.error(`[REDIS] :: ERROR DECREASING PEER COUNT :: ${error}`);
+    throw error;
+  }
+};
+
+// cleanup session - [socket] - index -> [initsocket] -> [disconnect]
+export const cleanupOnDisconnect = async (peerId: PeerID): Promise<void> => {
+  if (!peerId) {
+    logger.error(
+      `[REDIS] :: [cleanupOnDisconnect] :: [peerId] :: PEER ID INVALID`,
+    );
+    throw new Error("PeerId invalid");
+  }
+
+  try {
+    // find session
+    const sessionId = await redisClient.get(peerId);
+    if (!sessionId) {
+      logger.error(
+        `[REDIS] :: [cleanupOnDisconnect] :: [sessionId] :: SESSION ID INVALID`,
+      );
+      throw new Error("SessionId invalid");
+    }
+
+    // check who created the session
+    const createdBy = await redisClient.hGet(sessionId, "createdBy");
+    if (!createdBy) {
+      logger.error(`[REDIS] :: ERROR GETTING CREATEDBY`);
+      throw new Error("Peer does not exist");
+    }
+
+    const pipeline = redisClient.multi();
+
+    // delete session
+    if (createdBy === peerId) pipeline.del(sessionId);
+
+    // delete peer mapping
+    pipeline.del(peerId);
+
+    await pipeline.exec();
+
+    logger.warn(`[SOCKET] :: CLOSED ALL SESSIONS for peer :: ${peerId}`);
+  } catch (error) {
+    logger.error(
+      `[REDIS] :: ERROR WHILE CLEANING ON DISCONNECT FOR PEER ${peerId} :: ${error}`,
+    );
+    throw error;
+  }
+};
+
+// get connected peers
+export const getConnectedPeers = async (sessionId: string): Promise<number> => {
+  if (!sessionId) {
+    logger.error(
+      `[REDIS] :: [getConnectedPeers] :: [sessionId] :: SESSION ID INVALID`,
+    );
+    throw new Error("SessionId invalid");
+  }
+
+  try {
+    const count = await redisClient.hGet(sessionId, "connectedPeers");
+    return count ? Number(count) : 0;
+  } catch (error) {
+    logger.error(`[REDIS] :: ERROR GETTING ROOM SIZE :: ${error}`);
+    throw error;
+  }
+};
+
+// delete session
+export const deleteSession = async (sessionId: sessionId): Promise<void> => {
+  if (!sessionId) {
+    logger.error(
+      `[REDIS] :: [deleteSession] :: [sessionId] :: SESSION ID INVALID`,
+    );
+    throw new Error("SessionId invalid");
   }
 
   try {
@@ -170,37 +265,6 @@ export const deleteSession = async (sessionId: SessionID): Promise<void> => {
     await redisClient.del(sessionId);
   } catch (error) {
     logger.error(`[REDIS] :: ERROR WHILE DELETING SESSION :: ${error}`);
-  }
-};
-
-// cleanup session
-export const cleanupOnDisconnect = async (peerId: PeerID): Promise<void> => {
-  const PEER_KEY: PeerID = peerId;
-  if (!PEER_KEY) return;
-
-  try {
-    // find session
-    const sessionID = await redisClient.get(PEER_KEY);
-    if (!sessionID) {
-      logger.error(`[REDIS] :: ERROR GETTING SESSION`);
-      return;
-    }
-
-    // check who created the session
-    const createdBy = await redisClient.hGet(sessionID, "createdBy");
-    if (!createdBy) {
-      logger.error(`[REDIS] :: ERROR GETTING CREATEDBY`);
-      return;
-    }
-
-    // delete session
-    if (createdBy === peerId) await redisClient.del(sessionID);
-
-    // delete peer mapping
-    await redisClient.del(PEER_KEY);
-
-    logger.warn(`[SOCKET] :: CLOSED ALL SESSIONS for peer :: ${PEER_KEY}`);
-  } catch (error) {
-    logger.error(`[REDIS] :: ERROR WHILE CLEANING ON DISCONNECT :: ${error}`);
+    throw error;
   }
 };

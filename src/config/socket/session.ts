@@ -14,42 +14,45 @@ export const handleSessions = (io: Server, socket: Socket) => {
 
     try {
       // generate and store session
-      const sessionID = crypto.randomUUID();
-      await createSession(sessionID, socket.id);
+      const sessionId = crypto.randomUUID();
+      await createSession(sessionId, socket.id);
 
       // join session
-      socket.join(sessionID);
+      socket.join(sessionId);
 
       logger.info(
-        `[SOCKET] :: [SESSION] CREATED by peer :: ${socket.id} with SESSION_ID :: ${sessionID}`,
+        `[SOCKET] :: [SESSION] CREATED by peer :: ${socket.id} with SESSION_ID :: ${sessionId}`,
       );
-      callback({ sessionID });
+      callback({
+        success: true,
+        sessionId,
+        message: "session creation successful",
+      });
     } catch (error) {
+      callback({ success: false, message: "session creation failed" });
       logger.error(`[SESSION] :: ERROR WHILE CREATING SESSION :: ${error}`);
     }
   });
 
   // join session
-  socket.on("join-session", async ({ sessionID }, callback) => {
+  socket.on("join-session", async ({ sessionId }, callback) => {
     // check callback
     if (typeof callback !== "function") return;
 
-    const tryJoinnigSession = joinSession(sessionID);
-    if (!tryJoinnigSession)
-      callback({ success: false, message: "Maximum session limit reach" });
-
     // join session
     try {
-      socket.join(sessionID);
-      socket.to(sessionID).emit("peer-joined");
+      await joinSession(sessionId);
+      socket.join(sessionId);
+      socket.to(sessionId).emit("peer-joined");
 
-      await refreshSessionTTL(sessionID);
+      await refreshSessionTTL(sessionId);
 
       logger.info(
-        `[SOCKET] :: [SESSION] :: ${sessionID} JOINED by PEER :: ${socket.id}`,
+        `[SOCKET] :: [SESSION] :: ${sessionId} JOINED by PEER :: ${socket.id}`,
       );
-      callback({ success: true });
+      callback({ success: true, message: "session joined sucessfully" });
     } catch (error) {
+      callback({ success: false, message: "Maximum session limit reach" });
       logger.error(`[SESSION] :: ERROR WHILE JOINING SESSION :: ${error}`);
     }
   });

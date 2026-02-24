@@ -5,7 +5,7 @@ export enum SessionStatus {
   ERROR = "error",
 }
 
-export type SessionID = string;
+export type sessionId = string;
 export type PeerID = string;
 export type SocketId = string;
 export type MaxAllowedPeers = string | null | number;

@@ -20,7 +20,13 @@ export const initSocket = (io: Server): void => {
       );
 
       // cleanup
-      await cleanupOnDisconnect(socket.id);
+      try {
+        await cleanupOnDisconnect(socket.id);
+      } catch (error) {
+        logger.error(
+          `[SESSION] :: [cleanupOnDisconnect] :: ERROR ON CLEANING UP :: ${error}`,
+        );
+      }
     });
   });
 };
