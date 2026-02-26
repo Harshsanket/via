@@ -6,7 +6,7 @@ import {
   refreshSessionTTL,
 } from "../redis/service.js";
 
-export const handleSessions = (io: Server, socket: Socket) => {
+export const handleSessions = (io: Server, socket: Socket): void => {
   // create session
   socket.on("create-session", async (callback) => {
     // check callback
@@ -45,6 +45,7 @@ export const handleSessions = (io: Server, socket: Socket) => {
       socket.join(sessionId);
       socket.to(sessionId).emit("peer-joined");
 
+      // change it for user- bug here [fixed] // used createdBy to refresh ttl
       await refreshSessionTTL(sessionId);
 
       logger.info(

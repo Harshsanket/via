@@ -2,11 +2,15 @@ import { Server, Socket } from "socket.io";
 import { handleWebRTC } from "../webrtc/index.js";
 import { logger } from "../../utils/logger.js";
 import { handleSessions } from "./session.js";
-import { cleanupOnDisconnect } from "../redis/service.js";
+import { cleanupOnDisconnect, registerPeer } from "../redis/service.js";
 
 export const initSocket = (io: Server): void => {
-  io.on("connection", (socket: Socket): void => {
-    logger.info(`[SOCKET] :: [CONNECTED] peer :: ${socket.id}`);
+  io.on("connection", async (socket: Socket): Promise<void> => {
+    try {
+      await registerPeer(socket.id);
+    } catch (error) {
+      logger.error(`[SOCKET] :: [ERROR] :: [PEER] :: ${socket.id}`);
+    }
 
     // session
     handleSessions(io, socket);

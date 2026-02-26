@@ -11,6 +11,7 @@ export type SocketId = string;
 export type MaxAllowedPeers = string | null | number;
 export type CurrentPeers = string | null | number;
 export type CheckSession = boolean;
+export type CheckPeer = string | null;
 
 export interface RedisSession extends Record<string, string> {
   createdBy: string;

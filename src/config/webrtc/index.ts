@@ -7,7 +7,7 @@ import {
 } from "../redis/service.js";
 import { SessionStatus } from "../../config/redis/types.js";
 
-export function handleWebRTC(io: Server, socket: Socket): void {
+export const handleWebRTC = (io: Server, socket: Socket): void => {
   // OFFER
   socket.on("offer", async ({ sessionId, offer }) => {
     // check sessionId and offer
@@ -103,9 +103,9 @@ export function handleWebRTC(io: Server, socket: Socket): void {
       }
 
       logger.warn(
-        `[SOCKET] :: Peer :: ${socket.id} [DISCONNECTED] session :: ${roomId}`,
+        `[SOCKET] :: [DISCONNECTED]:: Peer :: ${socket.id} session :: ${roomId}`,
       );
       socket.to(roomId).emit("peer-left");
     }
   });
-}
+};

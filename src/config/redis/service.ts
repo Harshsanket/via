@@ -9,8 +9,26 @@ import {
   MaxAllowedPeers,
   CurrentPeers,
   CheckSession,
+  CheckPeer,
 } from "./types.js";
 import { SESSION_TTL, REFRESH_SESSION_TTL } from "./constants.js";
+
+// register peer
+export const registerPeer = async (peerKey: string) => {
+  if (!peerKey) {
+    logger.error(`[SOCKET] :: [ERROR] :: PEER KEY NOT FOUND :: ${peerKey}`);
+    throw new Error("peerKey required");
+  }
+
+  try {
+    await redisClient.set(peerKey, "NO_SESSION", {
+      EX: SESSION_TTL,
+    });
+    logger.info(`[SOCKET] :: [CONNECTED] peer :: ${peerKey}`);
+  } catch (error) {
+    throw error;
+  }
+};
 
 // create session - [socket] session.ts -> [handleSessions] -> [create-session]
 export const createSession = async (
@@ -20,16 +38,29 @@ export const createSession = async (
   const SESSION_KEY: sessionId = sessionId;
   const PEER_KEY: PeerID = peer;
 
+  // [BUG] here it is an resurrection for ttl in [refreshSessionTTL]
   const session: RedisSession = {
     createdBy: PEER_KEY,
-    connectedPeers: "0",
-    maxAllowedPeers: "2",
+    connectedPeers: "",
+    maxAllowedPeers: "1",
     status: SessionStatus.WAITING,
     createdAt: Date.now().toString(),
     lastActivity: Date.now().toString(),
   };
 
   try {
+    let checkPeer: CheckPeer = await redisClient.get(PEER_KEY);
+
+    if (checkPeer === null) {
+      logger.error(`[REDIS] :: [createSession] :: PEER NOT FOUND`);
+      throw new Error("Peer not found or expired");
+    }
+
+    if (checkPeer !== "NO_SESSION") {
+      logger.error(`[REDIS] :: [createSession] :: PEER ALREADY IN SESSION`);
+      throw new Error("Peer already in session");
+    }
+
     // set redis client
     await redisClient.hSet(SESSION_KEY, session);
     // map peer to session
@@ -92,9 +123,16 @@ export const joinSession = async (sessionId: sessionId): Promise<void> => {
 
     currentPeers = Number(currentPeers);
 
-    if (currentPeers < maxAllowedPeers) {
-      await redisClient.hIncrBy(sessionId, "connectedPeers", 1);
+    if (maxAllowedPeers > currentPeers) {
+      logger.error(`[REDIS] :: ERROR JOINING SESSION :: SESSION LIMIT REACHED`);
+      throw new Error("Session limit reached");
     }
+
+    await redisClient
+      .multi()
+      .hIncrBy(sessionId, "connectedPeers", 1)
+      .hSet(sessionId, "lastActivity", Date.now().toString())
+      .exec();
   } catch (error) {
     logger.error(`[REDIS] :: ERROR JOINING SESSION :: ${error}`);
     throw error;
@@ -112,8 +150,29 @@ export const refreshSessionTTL = async (
     throw new Error("SessionId invalid");
   }
 
+  const now = Date.now() + Number(SESSION_TTL);
+
+  // [BUG] session will keep refreshing ttl if users keep leaving and joining to extend session life
   try {
-    await redisClient.expire(sessionId, REFRESH_SESSION_TTL);
+    const [createdBy, createdAt] = await redisClient.hmGet(sessionId, [
+      "createdBy",
+      "createdAt",
+    ]);
+    if (!createdBy || !createdAt) {
+      logger.warn(
+        `[REDIS] :: SESSION :: ${sessionId} has no createdBy or createdAt`,
+      );
+      throw new Error("sessionId not found");
+    }
+
+    if (now > Number(createdAt)) return;
+
+    await redisClient
+      .multi()
+      .hSet(sessionId, "lastActivity", Date.now().toString())
+      .expire(sessionId, REFRESH_SESSION_TTL)
+      .expire(createdBy, REFRESH_SESSION_TTL)
+      .exec();
   } catch (error) {
     logger.error(`[REDIS] :: ERROR WHILE REFRESHING SESSION :: ${error}`);
     throw error;
@@ -146,7 +205,11 @@ export const changeTransferStatus = async (
   }
 
   try {
-    await redisClient.hSet(sessionId, "status", status.toLowerCase());
+    await redisClient
+      .multi()
+      .hSet(sessionId, "lastActivity", Date.now().toString())
+      .hSet(sessionId, "status", status.toLowerCase())
+      .exec();
   } catch (error) {
     logger.error(`[REDIS] :: ERROR UPDATING TRANSFER STATUS :: ${error}`);
     throw error;
@@ -178,9 +241,13 @@ export const decreasePeersCount = async (
     const count = await redisClient.hGet(sessionId, "connectedPeers");
     const currentCount = count ? Number(count) : 0;
 
-    if (currentCount > 0)
-      await redisClient.hIncrBy(sessionId, "connectedPeers", -1);
+    if (currentCount < 0) return;
 
+    await redisClient
+      .multi()
+      .hSet(sessionId, "lastActivity", Date.now().toString())
+      .hIncrBy(sessionId, "connectedPeers", -1)
+      .exec();
     logger.info(`[REDIS] :: DECREASING PEER COUNT for session :: ${sessionId}`);
   } catch (error) {
     logger.error(`[REDIS] :: ERROR DECREASING PEER COUNT :: ${error}`);
