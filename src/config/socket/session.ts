@@ -41,7 +41,7 @@ export const handleSessions = (io: Server, socket: Socket): void => {
 
     // join session
     try {
-      await joinSession(sessionId);
+      await joinSession(sessionId, socket.id);
       socket.join(sessionId);
       socket.to(sessionId).emit("peer-joined");
 

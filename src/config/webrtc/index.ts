@@ -4,90 +4,374 @@ import {
   changeTransferStatus,
   decreasePeersCount,
   isSessionExist,
+  storeFileMetadata,
 } from "../redis/service.js";
 import { SessionStatus } from "../../config/redis/types.js";
+import {
+  OfferPayload,
+  AnswerPayload,
+  IceCandidatePayload,
+  FileMetadataPayload,
+  TransferCompletePayload,
+  TransferErrorPayload
+} from "./types.js";
 
 export const handleWebRTC = (io: Server, socket: Socket): void => {
   // OFFER
-  socket.on("offer", async ({ sessionId, offer }) => {
-    // check sessionId and offer
-    if (!sessionId || typeof sessionId !== "string" || !offer) {
-      return socket.emit("error", { message: "Offer invalid" });
-    }
+  socket.on(
+    "offer",
+    async ({ sessionId, offer }: OfferPayload): Promise<void> => {
+      try {
+        if (!sessionId || typeof sessionId !== "string" || !offer) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:OFFER] :: SESSION OR INAVLID OFFER`,
+          );
+          socket.emit("error", { message: "Offer invalid" });
+          return;
+        }
 
-    // get session info
-    const session = await isSessionExist(sessionId);
-    if (!session) {
-      logger.error(`[WEB RTC] :: ERROR GETTING SESSION :: ${sessionId}`);
-      return socket.emit("error", {
-        message: "Session expired or invalid",
-      });
-    }
+        const session = await isSessionExist(sessionId);
 
-    // fwd to peer
-    socket.to(sessionId).emit("offer", { offer });
-    logger.info(`[WEB RTC] :: OFFER FORWARDED TO SESSION :: ${sessionId}`);
-  });
+        if (!session) {
+          logger.error(
+            `[WEB RTC] :: [OFFER] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        if (!socket.rooms.has(sessionId)) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:OFFER] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        socket.to(sessionId).emit("offer", { offer });
+
+        logger.info(
+          `[WEB RTC] :: [OFFER FORWARDED] TO SESSION :: ${sessionId}`,
+        );
+      } catch (err: unknown) {
+        logger.error(
+          `[WEB RTC] :: [OFFER HANDLER FAILED] for Session :: ${sessionId} with Error :: ${err}`,
+        );
+        socket.emit("error", {
+          message: "Internal server error",
+        });
+      }
+    },
+  );
 
   // ANSWER
-  socket.on("answer", async ({ sessionId, answer }) => {
-    const session = await isSessionExist(sessionId);
-    if (!session) {
-      logger.error(`[WEB RTC] :: ERROR GETTING SESSION :: ${sessionId}`);
-      return socket.emit("error", {
-        message: "Session expired or invalid",
-      });
-    }
+  socket.on(
+    "answer",
+    async ({ sessionId, answer }: AnswerPayload): Promise<void> => {
+      try {
+        if (!sessionId || typeof sessionId !== "string" || !answer) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:ANSWER] :: SESSION OR INAVLID ANSWER`,
+          );
+          socket.emit("error", { message: "Answer invalid" });
+          return;
+        }
 
-    logger.info(`[SOCKET] :: ANSWER FORWARDED to session :: ${sessionId}`);
-    socket.to(sessionId).emit("answer", { answer });
-  });
+        const session = await isSessionExist(sessionId);
+
+        if (!session) {
+          logger.error(
+            `[WEB RTC] :: [ANSWER] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        if (!socket.rooms.has(sessionId)) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:ANSWER] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        socket.to(sessionId).emit("answer", { answer });
+
+        logger.info(
+          `[WEB RTC] :: [ANSWER FORWARDED] TO SESSION :: ${sessionId}`,
+        );
+      } catch (err: unknown) {
+        logger.error(
+          `[WEB RTC] :: [ANSWER HANDLER] FAILED for session :: ${sessionId} with Error :: ${err}`,
+        );
+
+        socket.emit("error", {
+          message: "Internal server error",
+        });
+      }
+    },
+  );
 
   // ICE CANDIDATE
-  socket.on("ice-candidate", async ({ sessionId, candidate }) => {
-    const session = await isSessionExist(sessionId);
-    if (!session) {
-      logger.error(`[WEB RTC] :: ERROR GETTING SESSION :: ${sessionId}`);
-      return socket.emit("error", {
-        message: "Session expired or invalid",
-      });
-    }
+  socket.on(
+    "ice-candidate",
+    async ({ sessionId, candidate }: IceCandidatePayload): Promise<void> => {
+      try {
+        if (!sessionId || typeof sessionId !== "string" || !candidate) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:ICE_CANDIDATE] :: SESSION OR INAVLID ICE CANDIDATE`,
+          );
+          socket.emit("error", { message: "ICE candidate invalid" });
+          return;
+        }
 
-    socket.to(sessionId).emit("ice-candidate", { candidate });
-  });
+        const session = await isSessionExist(sessionId);
+
+        if (!session) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:ICE_CANDIDATE] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        if (!socket.rooms.has(sessionId)) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:ICE_CANDIDATE] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Unauthorized session access",
+          });
+          return;
+        }
+
+        socket.to(sessionId).emit("ice-candidate", { candidate });
+
+        logger.info(
+          `[WEB RTC] :: [ICE CANDIDATE] FORWARDED TO SESSION :: ${sessionId}`,
+        );
+      } catch (err: unknown) {
+        logger.error(
+          `[WEB RTC] :: [ICE HANDLER] FAILED for session :: ${sessionId} with Error :: ${err}`,
+        );
+
+        socket.emit("error", {
+          message: "Internal server error",
+        });
+      }
+    },
+  );
+
+  // Metadata
+  socket.on(
+    "file-metadata",
+    async ({ sessionId, metadata }: FileMetadataPayload): Promise<void> => {
+      try {
+        if (!sessionId || typeof sessionId !== "string") {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:FILE_METADATA] :: SESSION OR INAVLID FILE METADATA`,
+          );
+          socket.emit("error", { message: "Invalid sessionId" });
+          return;
+        }
+
+        if (
+          !metadata ||
+          typeof metadata.fileName !== "string" ||
+          typeof metadata.mimeType !== "string" ||
+          typeof metadata.fileSize !== "number"
+        ) {
+          socket.emit("error", { message: "Invalid file metadata" });
+          return;
+        }
+
+        const { fileName, mimeType, fileSize } = metadata;
+
+        const session = await isSessionExist(sessionId);
+
+        if (!session) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:FILE_METADATA] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        if (!socket.rooms.has(sessionId)) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:FILE_METADATA] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        await storeFileMetadata(sessionId, {
+          fileName,
+          mimeType,
+          fileSize,
+        });
+
+        socket.to(sessionId).emit("file-metadata", { metadata });
+
+        socket.emit("file-metadata-received", {
+          sessionId,
+          fileName,
+          success: true,
+        });
+
+        logger.info(
+          `[SOCKET] :: [FILE METADATA] Received for Session: ${sessionId}`,
+        );
+      } catch (err: unknown) {
+        logger.error(
+          `[SOCKET] :: [FILE METADATA] :: HANDLER FAILED for session ${sessionId} with Error :: ${err}`,
+        );
+
+        socket.emit("file-metadata-received", {
+          sessionId,
+          success: false,
+          error: "Failed sharing metadata",
+        });
+      }
+    },
+  );
 
   // completion
-  socket.on("transfer-complete", async ({ sessionId, fileName }) => {
-    try {
-      await changeTransferStatus(sessionId, SessionStatus.COMPLETED);
-    } catch (error) {
-      logger.error(
-        `[REDIS] :: Error changing session status ${sessionId} :: WEB RTC`,
-      );
-    }
+  socket.on(
+    "transfer-complete",
+    async ({ sessionId, fileName }: TransferCompletePayload): Promise<void> => {
+      try {
+        if (
+          !sessionId ||
+          typeof sessionId !== "string" ||
+          !fileName ||
+          typeof fileName !== "string"
+        ) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:TRANSFER_COMPLETE] :: SESSION OR INAVLID FILE NAME`,
+          );
+          socket.emit("error", {
+            message: "Invalid transfer completion payload",
+          });
+          return;
+        }
 
-    logger.info(
-      `[SOCKET] :: FILE :: [${fileName}] Transfer complete by session :: ${sessionId}`,
-    );
-    socket.to(sessionId).emit("transfer-complete", { fileName });
-  });
+        const session = await isSessionExist(sessionId);
+
+        if (!session) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:TRANSFER_COMPLETE] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        if (!socket.rooms.has(sessionId)) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:TRANSFER_COMPLETE] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        await changeTransferStatus(sessionId, SessionStatus.COMPLETED);
+
+        logger.info(
+          `[WEB RTC] :: FILE TRANSFER COMPLETE by session :: ${sessionId}`,
+        );
+
+        socket.to(sessionId).emit("transfer-complete", { fileName });
+      } catch (err: unknown) {
+        logger.error(
+          `[WEB RTC] :: [TRANSFER COMPLETE] :: HANDLER FAILED :: ${sessionId} with Error :: ${err}`,
+        );
+
+        socket.emit("error", {
+          message: "Internal server error",
+        });
+      }
+    },
+  );
 
   // error
-  socket.on("transfer-error", async ({ sessionId, message }) => {
+socket.on(
+  "transfer-error",
+  async ({ sessionId, message }: TransferErrorPayload): Promise<void> => {
     try {
-      await changeTransferStatus(sessionId, SessionStatus.ERROR);
-    } catch (error) {
+      if (
+        !sessionId ||
+        typeof sessionId !== "string" ||
+        !message ||
+        typeof message !== "string"
+      ) {
+        logger.error(
+            `[WEB RTC] :: [SOCKET:TRANSFER_ERROR] :: SESSION OR INAVLID FILE NAME`,
+          );
+        socket.emit("error", { message: "Invalid transfer error payload" });
+        return;
+      }
+
+      const session = await isSessionExist(sessionId);
+
+      if (!session) {
+        logger.error(
+          `[WEB RTC] :: [SOCKET:TRANSFER_ERROR] :: ERROR GETTING SESSION :: ${sessionId}`
+        );
+        socket.emit("error", {
+          message: "Session expired or invalid",
+        });
+        return;
+      }
+
+      if (!socket.rooms.has(sessionId)) {
+        logger.error(
+          `[WEB RTC] :: [SOCKET:TRANSFER_ERROR] :: ERROR GETTING SESSION :: ${sessionId}`
+        );
+
+        socket.emit("error", {
+          message: "Unauthorized session access",
+        });
+        return;
+      }
+
+        await changeTransferStatus(
+          sessionId,
+          SessionStatus.ERROR
+        );
+
+      socket
+        .to(sessionId)
+        .emit("transfer-error", { message });
+
+    } catch (err: unknown) {
       logger.error(
-        `[REDIS] :: Error changing session status ${sessionId} :: WEB RTC`,
+        `[WEB RTC] :: [TRANSFER ERROR] :: HANDLER FAILED for session :: ${sessionId} with Error :: ${err}`
       );
+
+      socket.emit("error", {
+        message: "Internal server error",
+      });
     }
-
-    logger.error(
-      `[SOCKET] :: Transfer error occured by session :: ${sessionId} with  message :: ${message}`,
-    );
-
-    socket.to(sessionId).emit("error", { message });
-  });
+  }
+);
 
   // disconneting
   socket.on("disconnecting", async () => {

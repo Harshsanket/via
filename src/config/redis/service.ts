@@ -3,7 +3,7 @@ import { logger } from "../../utils/logger.js";
 
 import {
   SessionStatus,
-  sessionId,
+  SessionId,
   PeerID,
   RedisSession,
   MaxAllowedPeers,
@@ -32,17 +32,20 @@ export const registerPeer = async (peerKey: string) => {
 
 // create session - [socket] session.ts -> [handleSessions] -> [create-session]
 export const createSession = async (
-  sessionId: sessionId,
+  sessionId: SessionId,
   peer: PeerID,
 ): Promise<void> => {
-  const SESSION_KEY: sessionId = sessionId;
+  const SESSION_KEY: SessionId = sessionId;
   const PEER_KEY: PeerID = peer;
 
   // [BUG] here it is an resurrection for ttl in [refreshSessionTTL]
   const session: RedisSession = {
     createdBy: PEER_KEY,
-    connectedPeers: "",
+    connectedPeer: "NO_PEER",
     maxAllowedPeers: "1",
+    fileName: "NOT_SELECTED",
+    mimeType: "NOT_SELECTED",
+    fileSize: "NOT_SELECTED",
     status: SessionStatus.WAITING,
     createdAt: Date.now().toString(),
     lastActivity: Date.now().toString(),
@@ -76,7 +79,10 @@ export const createSession = async (
 };
 
 // join session - [socket] session.ts -> [handleSessions] -> [join-session]
-export const joinSession = async (sessionId: sessionId): Promise<void> => {
+export const joinSession = async (
+  sessionId: SessionId,
+  peerId: PeerID,
+): Promise<void> => {
   // check session id
   if (!sessionId) {
     logger.error(
@@ -112,36 +118,30 @@ export const joinSession = async (sessionId: sessionId): Promise<void> => {
     // get current peers
     let currentPeers: CurrentPeers = await redisClient.hGet(
       sessionId,
-      "connectedPeers",
+      "connectedPeer",
     );
-    if (!currentPeers) {
-      logger.error(
-        `[REDIS] :: [joinSession] :: [currentPeers] :: CURRENT PEER NOT FOUND`,
+    if (currentPeers !== 'NO_PEER') {
+      logger.warn(
+        `[REDIS] :: [joinSession] :: Session full`,
       );
-      throw new Error("Current peer does not exist");
-    }
-
-    currentPeers = Number(currentPeers);
-
-    if (maxAllowedPeers > currentPeers) {
-      logger.error(`[REDIS] :: ERROR JOINING SESSION :: SESSION LIMIT REACHED`);
       throw new Error("Session limit reached");
     }
 
     await redisClient
       .multi()
-      .hIncrBy(sessionId, "connectedPeers", 1)
+      .hSet(sessionId, "connectedPeer", peerId)
       .hSet(sessionId, "lastActivity", Date.now().toString())
       .exec();
-  } catch (error) {
+  } catch (error: any) {
     logger.error(`[REDIS] :: ERROR JOINING SESSION :: ${error}`);
+    console.error(error.replies);
     throw error;
   }
 };
 
 // refresh ttl - [socket] session.ts -> [handleSessions] -> [join-session]
 export const refreshSessionTTL = async (
-  sessionId: sessionId,
+  sessionId: SessionId,
 ): Promise<void> => {
   if (!sessionId) {
     logger.error(
@@ -154,11 +154,11 @@ export const refreshSessionTTL = async (
 
   // [BUG] session will keep refreshing ttl if users keep leaving and joining to extend session life
   try {
-    const [createdBy, createdAt] = await redisClient.hmGet(sessionId, [
-      "createdBy",
-      "createdAt",
-    ]);
-    if (!createdBy || !createdAt) {
+    const [createdBy, createdAt, connectedPeer] = await redisClient.hmGet(
+      sessionId,
+      ["createdBy", "createdAt", "connectedPeer"],
+    );
+    if (!createdBy || !createdAt || !connectedPeer) {
       logger.warn(
         `[REDIS] :: SESSION :: ${sessionId} has no createdBy or createdAt`,
       );
@@ -171,6 +171,7 @@ export const refreshSessionTTL = async (
       .multi()
       .hSet(sessionId, "lastActivity", Date.now().toString())
       .expire(sessionId, REFRESH_SESSION_TTL)
+      .expire(connectedPeer, REFRESH_SESSION_TTL)
       .expire(createdBy, REFRESH_SESSION_TTL)
       .exec();
   } catch (error) {
@@ -181,20 +182,70 @@ export const refreshSessionTTL = async (
 
 // check session - [webrtc] -> [handleWebRTC] -> [offer] [answer] [ice-candidate]
 export const isSessionExist = async (
-  sessionId: sessionId,
+  sessionId: SessionId,
 ): Promise<boolean> => {
   if (!sessionId) {
     logger.error(
-      `[REDIS] :: [isSessionExist] :: [sessionId] :: SESSION ID INVALID`,
+      `[REDIS] :: [isSessionExist] :: [sessionId] ${sessionId} :: SESSION ID INVALID`,
     );
-    throw new Error("SessionId invalid");
+    
   }
   return (await redisClient.exists(sessionId)) === 1;
 };
 
+// store file metadata - [webrtc] -> [handleWebRTC] -> [file-metadata]
+export const storeFileMetadata = async (
+  sessionId: SessionId,
+  {
+    fileName,
+    mimeType,
+    fileSize,
+  }: {
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+  }
+) => {
+  if (!sessionId) {
+    logger.error(
+      `[REDIS] :: [storeFileMetadata] :: [sessionId] :: SESSION ID INVALID`
+    );
+    throw new Error("SessionId invalid");
+  }
+  if (
+    !fileName ||
+    !mimeType ||
+    typeof fileSize !== "number" ||
+    fileSize <= 0
+  ) {
+    logger.error(
+      `[REDIS] :: [storeFileMetadata] :: INVALID METADATA for session ${sessionId}`
+    );
+    throw new Error("Invalid file metadata");
+  }
+
+  try {
+    await redisClient
+      .multi()
+      .hSet(sessionId, "fileName", fileName)
+      .hSet(sessionId, "mimeType", mimeType)
+      .hSet(sessionId, "fileSize", fileSize.toString())
+      .exec();
+
+    logger.info(
+      `[REDIS] :: [storeFileMetadata] :: Stored metadata for session ${sessionId}`
+    );
+  } catch (error) {
+    logger.error(
+      `[REDIS] :: [storeFileMetadata] :: ERROR STORING METADATA :: ${error}`
+    );
+    throw error;
+  }
+};
+
 // change transfer status - [webrtc] -> [handleWebRTC] -> [transfer-complete] [transfer-error]
 export const changeTransferStatus = async (
-  sessionId: sessionId,
+  sessionId: SessionId,
   status: SessionStatus,
 ): Promise<void> => {
   if (!sessionId) {
@@ -218,7 +269,7 @@ export const changeTransferStatus = async (
 
 // decrease peers count - [webrtc] -> [handleWebRTC] -> [disconnecting]
 export const decreasePeersCount = async (
-  sessionId: sessionId,
+  sessionId: SessionId,
 ): Promise<void> => {
   if (!sessionId) {
     logger.error(
@@ -277,14 +328,13 @@ export const cleanupOnDisconnect = async (peerId: PeerID): Promise<void> => {
     // check who created the session
     const createdBy = await redisClient.hGet(sessionId, "createdBy");
     if (!createdBy) {
-      logger.error(`[REDIS] :: ERROR GETTING CREATEDBY`);
-      throw new Error("Peer does not exist");
+      logger.error(`[REDIS] :: PEER ${sessionId} :: DOES NOT HAVE SESSION`);
     }
 
     const pipeline = redisClient.multi();
 
     // delete session
-    if (createdBy === peerId) pipeline.del(sessionId);
+    if (createdBy === peerId) pipeline.del(sessionId)
 
     // delete peer mapping
     pipeline.del(peerId);
@@ -301,7 +351,7 @@ export const cleanupOnDisconnect = async (peerId: PeerID): Promise<void> => {
 };
 
 // get connected peers
-export const getConnectedPeers = async (sessionId: string): Promise<number> => {
+export const getConnectedPeers = async (sessionId: SessionId): Promise<number> => {
   if (!sessionId) {
     logger.error(
       `[REDIS] :: [getConnectedPeers] :: [sessionId] :: SESSION ID INVALID`,
@@ -319,7 +369,7 @@ export const getConnectedPeers = async (sessionId: string): Promise<number> => {
 };
 
 // delete session
-export const deleteSession = async (sessionId: sessionId): Promise<void> => {
+export const deleteSession = async (sessionId: SessionId): Promise<void> => {
   if (!sessionId) {
     logger.error(
       `[REDIS] :: [deleteSession] :: [sessionId] :: SESSION ID INVALID`,

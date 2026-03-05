@@ -5,7 +5,7 @@ export enum SessionStatus {
   ERROR = "error",
 }
 
-export type sessionId = string;
+export type SessionId = string;
 export type PeerID = string;
 export type SocketId = string;
 export type MaxAllowedPeers = string | null | number;
@@ -16,8 +16,11 @@ export type CheckPeer = string | null;
 export interface RedisSession extends Record<string, string> {
   createdBy: string;
   maxAllowedPeers: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: string;
   status: SessionStatus;
-  connectedPeers: string;
+  connectedPeer: string;
   createdAt: string;
   lastActivity: string;
 }
