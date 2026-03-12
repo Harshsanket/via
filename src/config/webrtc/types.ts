@@ -1,3 +1,5 @@
+import { FileMetaData } from "config/redis/types.js";
+
 export interface OfferPayload {
   sessionId: string;
   offer: RTCSessionDescriptionInit;
@@ -13,15 +15,9 @@ export interface IceCandidatePayload {
   candidate: RTCIceCandidateInit;
 }
 
-interface FileMetadata {
-  fileName: string;
-  mimeType: string;
-  fileSize: number;
-}
-
 export interface FileMetadataPayload {
   sessionId: string;
-  metadata: FileMetadata;
+  metadata: FileMetaData;
 }
 
 export interface TransferCompletePayload {

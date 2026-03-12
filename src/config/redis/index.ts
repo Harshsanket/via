@@ -3,6 +3,7 @@ import { logger } from "../../utils/logger.js";
 
 export const redisClient = createClient({ url: process.env.REDIS_URL });
 
+// server
 export const connectRedis = async (): Promise<void> => {
   try {
     logger.info(`[REDIS] :: Connecting to client...`);
@@ -13,7 +14,7 @@ export const connectRedis = async (): Promise<void> => {
     });
 
     redisClient.on("ready", () => {
-      logger.info(`[REDIS] :: Client ready`);
+      logger.info(`[REDIS] :: [CLIENT READY TO CONNECT]`);
     });
 
     // Connect client
@@ -25,10 +26,12 @@ export const connectRedis = async (): Promise<void> => {
       logger.warn(`[REDIS] :: Something went wrong while ping to client`);
 
     logger.info(
-      `[REDIS] :: Client connection successful :: ${process.env.REDIS_URL}`,
+      `[REDIS] :: [CLIENT CONNECTION SUCCESSFUL] :: CONNECTED TO :: ${process.env.REDIS_URL}`,
     );
   } catch (err) {
-    logger.error(`[REDIS] :: Client connection failed :: ${err}`);
+    logger.error(
+      `[REDIS] :: [ERROR] :: CLIENT CONNECTION FAILED WITH ERROR :: ${err}`,
+    );
     throw err;
   }
 };

@@ -3,6 +3,8 @@ import { logger } from "../../utils/logger.js";
 import {
   changeTransferStatus,
   decreasePeersCount,
+  getFileMetadata,
+  getSessionTTL,
   isSessionExist,
   storeFileMetadata,
 } from "../redis/service.js";
@@ -13,7 +15,7 @@ import {
   IceCandidatePayload,
   FileMetadataPayload,
   TransferCompletePayload,
-  TransferErrorPayload
+  TransferErrorPayload,
 } from "./types.js";
 
 export const handleWebRTC = (io: Server, socket: Socket): void => {
@@ -172,31 +174,38 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
     },
   );
 
-  // Metadata
+  // store Metadata
   socket.on(
     "file-metadata",
     async ({ sessionId, metadata }: FileMetadataPayload): Promise<void> => {
+      const MAX_FILE_SIZE: number = 50 * 1024 * 1024 * 1024;
+
+      if (!sessionId || typeof sessionId !== "string") {
+        logger.error(
+          `[WEB RTC] :: [SOCKET:FILE_METADATA] :: SESSION OR INAVLID FILE METADATA`,
+        );
+        socket.emit("error", { message: "Invalid sessionId" });
+        return;
+      }
+
+      if (
+        !metadata ||
+        typeof metadata.fileName !== "string" ||
+        typeof metadata.mimeType !== "string" ||
+        typeof metadata.fileSize !== "number"
+      ) {
+        socket.emit("error", { message: "Invalid file metadata" });
+        return;
+      }
+
+      if (metadata.fileSize <= 0 || metadata.fileSize > MAX_FILE_SIZE) {
+        socket.emit("error", { message: "Invalid file size" });
+        return;
+      }
+
+      const { fileName, mimeType, fileSize } = metadata;
+
       try {
-        if (!sessionId || typeof sessionId !== "string") {
-          logger.error(
-            `[WEB RTC] :: [SOCKET:FILE_METADATA] :: SESSION OR INAVLID FILE METADATA`,
-          );
-          socket.emit("error", { message: "Invalid sessionId" });
-          return;
-        }
-
-        if (
-          !metadata ||
-          typeof metadata.fileName !== "string" ||
-          typeof metadata.mimeType !== "string" ||
-          typeof metadata.fileSize !== "number"
-        ) {
-          socket.emit("error", { message: "Invalid file metadata" });
-          return;
-        }
-
-        const { fileName, mimeType, fileSize } = metadata;
-
         const session = await isSessionExist(sessionId);
 
         if (!session) {
@@ -225,8 +234,6 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
           fileSize,
         });
 
-        socket.to(sessionId).emit("file-metadata", { metadata });
-
         socket.emit("file-metadata-received", {
           sessionId,
           fileName,
@@ -250,8 +257,75 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
     },
   );
 
+  socket.on("get-file-metadata", async ({ sessionId, peerId }) => {
+    if (!sessionId || typeof sessionId !== "string") {
+      logger.error(`[WEBRTC] :: [get-file-metadata] :: SESSION INVALID`);
+      socket.emit("error", { message: "Invalid sessionId" });
+      return;
+    }
+
+    if (!peerId || typeof peerId !== "string") {
+      logger.error(`[WEBRTC] :: [get-file-metadata] :: PEER INVALID`);
+      socket.emit("error", { message: "Invalid peerId" });
+      return;
+    }
+
+    try {
+      logger.info(
+        `[WEBRTC] :: [get-file-metadata] :: REQUEST FROM ${peerId} FOR SESSION ${sessionId}`,
+      );
+
+      const metadata = await getFileMetadata(sessionId);
+
+      socket.emit("file-metadata", {
+        success: true,
+        sessionId,
+        peerId,
+        metadata,
+      });
+
+      logger.info(
+        `[WEBRTC] :: [get-file-metadata] :: METADATA SENT TO ${peerId}`,
+      );
+    } catch (error) {
+      logger.error(`[WEBRTC] :: [get-file-metadata] :: ERROR :: ${error}`);
+
+      socket.emit("file-metadata", {
+        success: false,
+        message: "Metadata not found",
+      });
+    }
+  });
+
+  // ttl
+  socket.once("get-ttl", async ({ sessionId, peerId }) => {
+    if (!sessionId || typeof sessionId !== "string") {
+      logger.error(`[WEB RTC] :: [get-ttl] :: SESSION INAVLID`);
+      socket.emit("error", { message: "Invalid sessionId" });
+      return;
+    }
+
+    if (!peerId || typeof peerId !== "string") {
+      logger.error(`[WEB RTC] :: [get-ttl] :: PEER ID INVALID`);
+      socket.emit("error", { message: "Invalid peerid" });
+      return;
+    }
+
+    try {
+      const result = await getSessionTTL(sessionId, peerId);
+
+      socket.emit("session-ttl", result);
+    } catch (error) {
+      logger.error(`[SOCKET] [getSessionTTL] ${error}`);
+
+      socket.emit("session:error", {
+        message: "Failed to fetch session TTL",
+      });
+    }
+  });
+
   // completion
-  socket.on(
+  socket.once(
     "transfer-complete",
     async ({ sessionId, fileName }: TransferCompletePayload): Promise<void> => {
       try {
@@ -312,66 +386,60 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
   );
 
   // error
-socket.on(
-  "transfer-error",
-  async ({ sessionId, message }: TransferErrorPayload): Promise<void> => {
-    try {
-      if (
-        !sessionId ||
-        typeof sessionId !== "string" ||
-        !message ||
-        typeof message !== "string"
-      ) {
-        logger.error(
+  socket.on(
+    "transfer-error",
+    async ({ sessionId, message }: TransferErrorPayload): Promise<void> => {
+      try {
+        if (
+          !sessionId ||
+          typeof sessionId !== "string" ||
+          !message ||
+          typeof message !== "string"
+        ) {
+          logger.error(
             `[WEB RTC] :: [SOCKET:TRANSFER_ERROR] :: SESSION OR INAVLID FILE NAME`,
           );
-        socket.emit("error", { message: "Invalid transfer error payload" });
-        return;
-      }
+          socket.emit("error", { message: "Invalid transfer error payload" });
+          return;
+        }
 
-      const session = await isSessionExist(sessionId);
+        const session = await isSessionExist(sessionId);
 
-      if (!session) {
+        if (!session) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:TRANSFER_ERROR] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+          socket.emit("error", {
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+
+        if (!socket.rooms.has(sessionId)) {
+          logger.error(
+            `[WEB RTC] :: [SOCKET:TRANSFER_ERROR] :: ERROR GETTING SESSION :: ${sessionId}`,
+          );
+
+          socket.emit("error", {
+            message: "Unauthorized session access",
+          });
+          return;
+        }
+
+        await changeTransferStatus(sessionId, SessionStatus.ERROR);
+
+        socket.to(sessionId).emit("transfer-error", { message });
+      } catch (err: unknown) {
         logger.error(
-          `[WEB RTC] :: [SOCKET:TRANSFER_ERROR] :: ERROR GETTING SESSION :: ${sessionId}`
-        );
-        socket.emit("error", {
-          message: "Session expired or invalid",
-        });
-        return;
-      }
-
-      if (!socket.rooms.has(sessionId)) {
-        logger.error(
-          `[WEB RTC] :: [SOCKET:TRANSFER_ERROR] :: ERROR GETTING SESSION :: ${sessionId}`
+          `[WEB RTC] :: [TRANSFER ERROR] :: HANDLER FAILED for session :: ${sessionId} with Error :: ${err}`,
         );
 
         socket.emit("error", {
-          message: "Unauthorized session access",
+          message: "Internal server error",
         });
-        return;
       }
-
-        await changeTransferStatus(
-          sessionId,
-          SessionStatus.ERROR
-        );
-
-      socket
-        .to(sessionId)
-        .emit("transfer-error", { message });
-
-    } catch (err: unknown) {
-      logger.error(
-        `[WEB RTC] :: [TRANSFER ERROR] :: HANDLER FAILED for session :: ${sessionId} with Error :: ${err}`
-      );
-
-      socket.emit("error", {
-        message: "Internal server error",
-      });
-    }
-  }
-);
+    },
+  );
 
   // disconneting
   socket.on("disconnecting", async () => {

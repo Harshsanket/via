@@ -15,7 +15,11 @@ export const handleSessions = (io: Server, socket: Socket): void => {
     try {
       // generate and store session
       const sessionId = crypto.randomUUID();
-      await createSession(sessionId, socket.id);
+      const createSessionParam = {
+        sessionId,
+        peerId: socket.id,
+      };
+      await createSession(createSessionParam);
 
       // join session
       socket.join(sessionId);
@@ -26,7 +30,6 @@ export const handleSessions = (io: Server, socket: Socket): void => {
       callback({
         success: true,
         sessionId,
-        message: "session creation successful",
       });
     } catch (error) {
       callback({ success: false, message: "session creation failed" });
@@ -41,7 +44,11 @@ export const handleSessions = (io: Server, socket: Socket): void => {
 
     // join session
     try {
-      await joinSession(sessionId, socket.id);
+      const joinSessionParam = {
+        sessionId,
+        peerId: socket.id,
+      };
+      await joinSession(joinSessionParam);
       socket.join(sessionId);
       socket.to(sessionId).emit("peer-joined");
 
@@ -51,7 +58,7 @@ export const handleSessions = (io: Server, socket: Socket): void => {
       logger.info(
         `[SOCKET] :: [SESSION] :: ${sessionId} JOINED by PEER :: ${socket.id}`,
       );
-      callback({ success: true, message: "session joined sucessfully" });
+      callback({ success: true });
     } catch (error) {
       callback({ success: false, message: "Maximum session limit reach" });
       logger.error(`[SESSION] :: ERROR WHILE JOINING SESSION :: ${error}`);
