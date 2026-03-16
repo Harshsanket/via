@@ -71,7 +71,11 @@ export const createSession = async ({
       .multi()
       .hSet(sessionId, session) // store session details
       .expire(sessionId, SESSION_TTL) // set session ttl
+<<<<<<< HEAD
       .set(peerId, sessionId, { EX: SESSION_TTL }) // map peer to session with new ttl
+=======
+      .set(peerId, sessionId, { KEEPTTL: true }) // map peer to session with new ttl
+>>>>>>> main
       .exec();
 
     logRedis("success", "createSession", "SESSION CREATED", {
@@ -80,7 +84,11 @@ export const createSession = async ({
     });
   } catch (error) {
     logRedis("error", "createSession", "ERROR WHILE STORING SESSION", error);
+<<<<<<< HEAD
     throw new Error("something went wrong");
+=======
+    throw error;
+>>>>>>> main
   }
 };
 
@@ -149,6 +157,7 @@ export const refreshSessionTTL = async (
 ): Promise<void> => {
   assertValidStrings([sessionId], "refreshSessionTTL");
 
+<<<<<<< HEAD
   try {
     const [createdBy, createdAt, connectedPeer] = await redisClient.hmGet(
       sessionId,
@@ -166,6 +175,25 @@ export const refreshSessionTTL = async (
       throw new Error("Session TTL expired");
     }
 
+=======
+  const [createdBy, connectedPeer] = await redisClient.hmGet(sessionId, [
+    "createdBy",
+    "connectedPeer",
+  ]);
+
+  if (!createdBy || !connectedPeer) {
+    logRedis("error", "refreshSessionTTL", "SESSION NOT FOUND", sessionId);
+    throw new Error("session not found");
+  }
+
+  const ttl = await redisClient.ttl(sessionId);
+  if (ttl <= 0) {
+    logRedis("error", "refreshSessionTTL", "SESSION EXPIRED", sessionId);
+    throw new Error("session TTL expired");
+  }
+
+  try {
+>>>>>>> main
     await redisClient
       .multi()
       .hSet(sessionId, "lastActivity", Date.now().toString())
@@ -181,6 +209,7 @@ export const refreshSessionTTL = async (
   }
 };
 
+<<<<<<< HEAD
 // check session - [webrtc] -> [handleWebRTC] -> [offer] [answer] [ice-candidate]
 export const isSessionExist = async (
   sessionId: SessionID,
@@ -232,6 +261,9 @@ export const storeFileMetadata = async (
 };
 
 // get file metadata
+=======
+// get file metadata - [socket] session.ts -> [handleSessions] -> [get-file-metadata]
+>>>>>>> main
 export const getFileMetadata = async (
   sessionId: SessionID,
 ): Promise<FileMetaData> => {
@@ -286,6 +318,59 @@ export const getFileMetadata = async (
   }
 };
 
+<<<<<<< HEAD
+=======
+// check session - [webrtc] -> [handleWebRTC] -> [offer] [answer] [ice-candidate]
+export const isSessionExist = async (
+  sessionId: SessionID,
+): Promise<boolean> => {
+  assertValidStrings([sessionId], "isSessionExist");
+  return (await redisClient.exists(sessionId)) === 1;
+};
+
+// store file metadata - [webrtc] -> [handleWebRTC] -> [file-metadata]
+export const storeFileMetadata = async (
+  sessionId: SessionID,
+  { fileName, mimeType, fileSize }: FileMetaData,
+): Promise<void> => {
+  assertValidStrings([sessionId], "storeFileMetadata");
+
+  if (!fileName || !mimeType || typeof fileSize !== "number" || fileSize <= 0) {
+    logRedis(
+      "error",
+      "storeFileMetadata",
+      "INVALID METADATA FOR SESSION",
+      sessionId,
+    );
+    throw new Error("invalid file metadata");
+  }
+
+  try {
+    await redisClient
+      .multi()
+      .hSet(sessionId, "fileName", fileName)
+      .hSet(sessionId, "mimeType", mimeType)
+      .hSet(sessionId, "fileSize", fileSize.toString())
+      .exec();
+
+    logRedis(
+      "success",
+      "storeFileMetadata",
+      "STORED METADATA FOR SESSION",
+      sessionId,
+    );
+  } catch (error) {
+    logRedis(
+      "error",
+      "storeFileMetadata",
+      "ERROR WHILE STORING METADATA",
+      error,
+    );
+    throw new Error("something went wrong");
+  }
+};
+
+>>>>>>> main
 //check ttl
 export const getSessionTTL = async (
   sessionId: SessionID,
@@ -294,6 +379,7 @@ export const getSessionTTL = async (
   assertValidStrings([sessionId, peerId], "getSessionTTL");
 
   try {
+<<<<<<< HEAD
     const [[createdAt, connectedPeer], ttl] = await Promise.all([
       redisClient.hmGet(sessionId, ["createdAt", "connectedPeer"]),
       redisClient.ttl(sessionId),
@@ -302,6 +388,22 @@ export const getSessionTTL = async (
     if (connectedPeer !== peerId) {
       logRedis("error", "getSessionTTL", "INVALID PEER", peerId);
       throw new Error("Invalid request");
+=======
+    const [[createdAt, createdBy, connectedPeer], ttl] = await Promise.all([
+      redisClient.hmGet(sessionId, ["createdAt", "createdBy", "connectedPeer"]),
+      redisClient.ttl(sessionId),
+    ]);
+    console.log("GET SESSION TTL PEER ID", peerId);
+    console.log("GET SESSION TTL CREATED AT", createdAt);
+    console.log("GET SESSION TTL CREATED BY", createdBy);
+    console.log("GET SESSION TTL CONNECTED PEER", connectedPeer);
+
+    const isValidPeer = peerId === connectedPeer || peerId === createdBy;
+
+    if (!isValidPeer) {
+      logRedis("error", "getSessionTTL", "INVALID PEER", peerId);
+      throw new Error("invalid request");
+>>>>>>> main
     }
 
     logRedis("success", "getSessionTTL", "FETCHING TTL", {
@@ -355,7 +457,11 @@ export const changeTransferStatus = async (
       "ERROR WHILE CHANGING TRANSFER STATUS",
       error,
     );
+<<<<<<< HEAD
     throw error;
+=======
+    throw new Error("something went wrong");
+>>>>>>> main
   }
 };
 
@@ -433,7 +539,11 @@ export const cleanupOnDisconnect = async (peerId: PeerID): Promise<void> => {
         "SESSION_ID NOT FOUND",
         sessionId,
       );
+<<<<<<< HEAD
       throw new Error("SessionId invalid");
+=======
+      throw new Error("sessionId invalid");
+>>>>>>> main
     }
 
     // check who created the session

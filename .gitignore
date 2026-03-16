@@ -77,11 +77,19 @@ docker-data/
 # Prisma / ORM (optional)
 # =========================
 prisma/migrations/
+<<<<<<< HEAD
+=======
+**/generated/
+>>>>>>> main
 
 # =========================
 # Files & Folders
 # =========================
 docs/
 test/
+<<<<<<< HEAD
 .gitignore
 /generated/prisma
+=======
+.gitignore
+>>>>>>> main

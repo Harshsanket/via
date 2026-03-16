@@ -1,4 +1,5 @@
 import { Server, Socket } from "socket.io";
+<<<<<<< HEAD
 import { logger } from "../../utils/logger.js";
 import {
   changeTransferStatus,
@@ -17,38 +18,69 @@ import {
   TransferCompletePayload,
   TransferErrorPayload,
 } from "./types.js";
+=======
+import { isSessionExist } from "../redis/service.js";
+import { OfferPayload, AnswerPayload, IceCandidatePayload } from "./types.js";
+import { logWebRTC } from "./utils.js";
+import { areValidStrings } from "../../utils/validators.js";
+>>>>>>> main
 
 export const handleWebRTC = (io: Server, socket: Socket): void => {
   // OFFER
   socket.on(
     "offer",
     async ({ sessionId, offer }: OfferPayload): Promise<void> => {
+<<<<<<< HEAD
       try {
         if (!sessionId || typeof sessionId !== "string" || !offer) {
           logger.error(
             `[WEB RTC] :: [SOCKET:OFFER] :: SESSION OR INAVLID OFFER`,
           );
           socket.emit("error", { message: "Offer invalid" });
+=======
+      const ctx = "handleWebRTC:[offer]";
+      logWebRTC("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
+      try {
+        if (!areValidStrings) {
+          logWebRTC("error", ctx, "SESSION INVALID");
+          socket.emit("session:error", {
+            success: false,
+            message: "invalid session",
+          });
+>>>>>>> main
           return;
         }
 
         const session = await isSessionExist(sessionId);
+<<<<<<< HEAD
 
         if (!session) {
           logger.error(
             `[WEB RTC] :: [OFFER] :: ERROR GETTING SESSION :: ${sessionId}`,
           );
           socket.emit("error", {
+=======
+        if (!session) {
+          logWebRTC("error", ctx, "ERROR GETTING SESSION");
+          socket.emit("session:error", {
+            success: false,
+>>>>>>> main
             message: "Session expired or invalid",
           });
           return;
         }
 
         if (!socket.rooms.has(sessionId)) {
+<<<<<<< HEAD
           logger.error(
             `[WEB RTC] :: [SOCKET:OFFER] :: ERROR GETTING SESSION :: ${sessionId}`,
           );
           socket.emit("error", {
+=======
+          logWebRTC("error", ctx, "ERROR GETTING SESSION");
+          socket.emit("session:error", {
+            success: false,
+>>>>>>> main
             message: "Session expired or invalid",
           });
           return;
@@ -56,6 +88,7 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
 
         socket.to(sessionId).emit("offer", { offer });
 
+<<<<<<< HEAD
         logger.info(
           `[WEB RTC] :: [OFFER FORWARDED] TO SESSION :: ${sessionId}`,
         );
@@ -65,6 +98,19 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
         );
         socket.emit("error", {
           message: "Internal server error",
+=======
+        logWebRTC("info", ctx, `OFFER FORWARDED TO SESSION ${sessionId}`);
+      } catch (err: unknown) {
+        logWebRTC(
+          "error",
+          ctx,
+          `OFFER HANDLER FAILED FOR SESSION :: ${sessionId}`,
+          err,
+        );
+        socket.emit("session:error", {
+          success: false,
+          message: "internal server error",
+>>>>>>> main
         });
       }
     },
@@ -74,6 +120,7 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
   socket.on(
     "answer",
     async ({ sessionId, answer }: AnswerPayload): Promise<void> => {
+<<<<<<< HEAD
       try {
         if (!sessionId || typeof sessionId !== "string" || !answer) {
           logger.error(
@@ -91,15 +138,42 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
           );
           socket.emit("error", {
             message: "Session expired or invalid",
+=======
+      const ctx = "handleWebRTC:[answer]";
+      logWebRTC("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
+
+      try {
+        if (!areValidStrings) {
+          logWebRTC("error", ctx, "SESSION INVALID");
+          socket.emit("session:error", {
+            success: false,
+            message: "invalid session",
+>>>>>>> main
           });
           return;
         }
 
+<<<<<<< HEAD
         if (!socket.rooms.has(sessionId)) {
           logger.error(
             `[WEB RTC] :: [SOCKET:ANSWER] :: ERROR GETTING SESSION :: ${sessionId}`,
           );
           socket.emit("error", {
+=======
+        const session = await isSessionExist(sessionId);
+        if (!session) {
+          logWebRTC("error", ctx, "ERROR GETTING SESSION");
+          socket.emit("session:error", {
+            success: false,
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+        if (!socket.rooms.has(sessionId)) {
+          logWebRTC("error", ctx, "ERROR GETTING SESSION");
+          socket.emit("session:error", {
+            success: false,
+>>>>>>> main
             message: "Session expired or invalid",
           });
           return;
@@ -107,6 +181,7 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
 
         socket.to(sessionId).emit("answer", { answer });
 
+<<<<<<< HEAD
         logger.info(
           `[WEB RTC] :: [ANSWER FORWARDED] TO SESSION :: ${sessionId}`,
         );
@@ -117,6 +192,20 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
 
         socket.emit("error", {
           message: "Internal server error",
+=======
+        logWebRTC("info", ctx, `ANSWER FORWARDED TO SESSION ${sessionId}`);
+      } catch (err: unknown) {
+        logWebRTC(
+          "error",
+          ctx,
+          `ANSWER HANDLER FAILED FOR SESSION :: ${sessionId}`,
+          err,
+        );
+
+        socket.emit("session:error", {
+          success: false,
+          message: "internal server error",
+>>>>>>> main
         });
       }
     },
@@ -126,6 +215,7 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
   socket.on(
     "ice-candidate",
     async ({ sessionId, candidate }: IceCandidatePayload): Promise<void> => {
+<<<<<<< HEAD
       try {
         if (!sessionId || typeof sessionId !== "string" || !candidate) {
           logger.error(
@@ -143,21 +233,50 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
           );
           socket.emit("error", {
             message: "Session expired or invalid",
+=======
+      const ctx = "handleWebRTC:[ice-candidate]";
+      logWebRTC("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
+      
+      try {
+        if (!areValidStrings) {
+          logWebRTC("error", ctx, "SESSION INVALID");
+          socket.emit("session:error", {
+            success: false,
+            message: "invalid session",
+>>>>>>> main
           });
           return;
         }
 
+<<<<<<< HEAD
         if (!socket.rooms.has(sessionId)) {
           logger.error(
             `[WEB RTC] :: [SOCKET:ICE_CANDIDATE] :: ERROR GETTING SESSION :: ${sessionId}`,
           );
           socket.emit("error", {
             message: "Unauthorized session access",
+=======
+        const session = await isSessionExist(sessionId);
+        if (!session) {
+          logWebRTC("error", ctx, "ERROR GETTING SESSION");
+          socket.emit("session:error", {
+            success: false,
+            message: "Session expired or invalid",
+          });
+          return;
+        }
+        if (!socket.rooms.has(sessionId)) {
+          logWebRTC("error", ctx, "ERROR GETTING SESSION");
+          socket.emit("session:error", {
+            success: false,
+            message: "Session expired or invalid",
+>>>>>>> main
           });
           return;
         }
 
         socket.to(sessionId).emit("ice-candidate", { candidate });
+<<<<<<< HEAD
 
         logger.info(
           `[WEB RTC] :: [ICE CANDIDATE] FORWARDED TO SESSION :: ${sessionId}`,
@@ -252,10 +371,29 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
           sessionId,
           success: false,
           error: "Failed sharing metadata",
+=======
+        logWebRTC(
+          "info",
+          ctx,
+          `ICE CANDIDATE FORWARDED TO SESSION ${sessionId}`,
+        );
+      } catch (err: unknown) {
+        logWebRTC(
+          "error",
+          ctx,
+          `ICE CANDIDATE HANDLER FAILED FOR SESSION :: ${sessionId}`,
+          err,
+        );
+
+        socket.emit("session:error", {
+          success: false,
+          message: "internal server error",
+>>>>>>> main
         });
       }
     },
   );
+<<<<<<< HEAD
 
   socket.on("get-file-metadata", async ({ sessionId, peerId }) => {
     if (!sessionId || typeof sessionId !== "string") {
@@ -460,4 +598,6 @@ export const handleWebRTC = (io: Server, socket: Socket): void => {
       socket.to(roomId).emit("peer-left");
     }
   });
+=======
+>>>>>>> main
 };

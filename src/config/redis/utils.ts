@@ -69,4 +69,10 @@ export const logRedis = (
       `[REDIS] :: [SUCCESS] :: [${context}] :: ${message} :: ${meta}`,
     );
   }
+<<<<<<< HEAD
+=======
+  if (level === "warn") {
+    logger.warn(`[REDIS] :: [WARN] :: [${context}] :: ${message} :: ${meta}`);
+  }
+>>>>>>> main
 };

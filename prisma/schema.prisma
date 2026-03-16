@@ -14,6 +14,7 @@ datasource db {
 }
 
 model User {
+<<<<<<< HEAD
   //user
   id       Int    @id @default(autoincrement())
   email    String @unique
@@ -65,3 +66,71 @@ model SharedFile {
   @@unique([userId, checksum])
   @@index([expiresAt])
 }
+=======
+  id            Int      @id @default(autoincrement())
+  email         String   @unique
+  username      String   @unique
+  passwordHash  String
+
+  fileSizeLimit BigInt?
+  storageUsed   BigInt   @default(0)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sharedFiles   SharedFile[]
+
+  @@index([email])
+}
+
+model SharedFile {
+  id            Int      @id @default(autoincrement())
+
+  // file identity
+  shortCode     String   @unique
+  fileName      String
+  extension     String?
+  mimeType      String?
+
+  // size
+  fileSize      BigInt
+
+  // integrity
+  checksum      String
+
+  // upload state
+  uploadStatus  FileUploadStatus @default(PENDING)
+  chunkCount    Int?
+
+  // access
+  downloadCount Int      @default(0)
+  lastAccessedAt DateTime?
+
+  // lifecycle
+  createdAt     DateTime @default(now())
+  expiresAt     DateTime
+  deletedAt     DateTime?
+
+  // session cleanup
+  sessionId     String?
+  isActive      Boolean  @default(true)
+
+  // relations
+  userId        Int
+  user          User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, checksum])
+  @@index([shortCode])
+  @@index([expiresAt])
+  @@index([sessionId])
+}
+
+enum FileUploadStatus {
+  PENDING
+  UPLOADING
+  READY
+  FAILED
+  EXPIRED
+  DELETED
+}
+>>>>>>> main

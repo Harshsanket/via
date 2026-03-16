@@ -5,7 +5,11 @@ export type MaxAllowedPeers = string | null | number;
 export type CurrentPeers = string | null | number;
 export type CheckSession = boolean;
 export type SessionData = { [key: string]: string };
+<<<<<<< HEAD
 export type Level = "error" | "success";
+=======
+export type Level = "error" | "success" | "warn";
+>>>>>>> main
 
 export enum SessionStatus {
   WAITING = "waiting",
