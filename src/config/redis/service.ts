@@ -71,7 +71,7 @@ export const createSession = async ({
       .multi()
       .hSet(sessionId, session) // store session details
       .expire(sessionId, SESSION_TTL) // set session ttl
-      .set(peerId, sessionId, { EX: SESSION_TTL }) // map peer to session with new ttl
+      .set(peerId, sessionId, { KEEPTTL: true }) // map peer to session with new ttl
       .exec();
 
     logRedis("success", "createSession", "SESSION CREATED", {
@@ -294,12 +294,18 @@ export const getSessionTTL = async (
   assertValidStrings([sessionId, peerId], "getSessionTTL");
 
   try {
-    const [[createdAt, connectedPeer], ttl] = await Promise.all([
-      redisClient.hmGet(sessionId, ["createdAt", "connectedPeer"]),
+    const [[createdAt, createdBy, connectedPeer], ttl] = await Promise.all([
+      redisClient.hmGet(sessionId, ["createdAt", "createdBy", "connectedPeer"]),
       redisClient.ttl(sessionId),
     ]);
+    console.log("GET SESSION TTL PEER ID", peerId);
+    console.log("GET SESSION TTL CREATED AT", createdAt);
+    console.log("GET SESSION TTL CREATED BY", createdBy);
+    console.log("GET SESSION TTL CONNECTED PEER", connectedPeer);
 
-    if (connectedPeer !== peerId) {
+    const isValidPeer = peerId === connectedPeer || peerId === createdBy;
+
+    if (!isValidPeer) {
       logRedis("error", "getSessionTTL", "INVALID PEER", peerId);
       throw new Error("invalid request");
     }

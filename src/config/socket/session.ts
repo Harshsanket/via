@@ -151,8 +151,8 @@ export const handleSessions = (io: Server, socket: Socket): void => {
   });
 
   // store metadata
-  socket.on("get-file-metadata", async ({ sessionId }) => {
-    const ctx = "handleSessions:[get-file-metadata]";
+  socket.on("store-file-metadata", async ({ sessionId,fileName, mimeType, fileSize }) => {
+    const ctx = "handleSessions:[store-file-metadata]";
     logSocket("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
 
     if (!areValidStrings(sessionId)) {
@@ -184,7 +184,7 @@ export const handleSessions = (io: Server, socket: Socket): void => {
         return;
       }
 
-      const metadata = await getFileMetadata(sessionId);
+      const metadata = await storeFileMetadata(sessionId, { fileName, mimeType, fileSize });
       socket.emit("file-metadata", {
         success: true,
         metadata,
