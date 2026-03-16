@@ -1,0 +1,87 @@
+# =========================
+# Node.js
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# TypeScript
+# =========================
+dist/
+build/
+*.tsbuildinfo
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# Runtime data
+# =========================
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# =========================
+# Coverage & testing
+# =========================
+coverage/
+.nyc_output/
+
+# =========================
+# Cache
+# =========================
+.cache/
+.eslintcache
+
+# =========================
+# IDEs & Editors
+# =========================
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS generated files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Temporary files
+# =========================
+tmp/
+temp/
+
+# =========================
+# Docker (if you add later)
+# =========================
+docker-data/
+
+# =========================
+# Prisma / ORM (optional)
+# =========================
+prisma/migrations/
+**/generated/
+
+# =========================
+# Files & Folders
+# =========================
+docs/
+test/
+.gitignore
