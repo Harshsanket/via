@@ -1,0 +1,60 @@
+# Local development and integration test dependencies.
+#
+#   docker compose up -d --wait      # start and wait for healthy
+#   npm run test:integration         # run the socket tests against them
+#   docker compose down              # stop (add -v to drop the data volume)
+#
+# Connection strings match the defaults used by test/socket.integration.test.mjs:
+#   REDIS_URL=redis://127.0.0.1:6379
+#
+# The relay matches the defaults used by test/turn-credentials.integration.test.mjs:
+#   TURN_URLS=turn:127.0.0.1:3478?transport=tcp,turn:127.0.0.1:3478?transport=udp
+#   TURN_SECRET=via-dev-turn-secret
+#
+# The secret below is a development placeholder that is published in this repo
+# on purpose, so the test suite can verify credentials end to end. It must never
+# be reused for a reachable relay: replace it and set TURN_SECRET to match.
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Development relay. `GET /api/v1/ice-servers` is useless without a relay to
+  # point clients at, and a real coturn is the only way to prove the minted
+  # credentials are accepted rather than merely well-formed.
+  #
+  # `--external-ip` advertises the published address so a browser on this
+  # machine can actually relay through it. Set it to this host's LAN address (or
+  # a public one) when testing from another device.
+  coturn:
+    image: coturn/coturn:4.6.2-alpine
+    command:
+      - --lt-cred-mech
+      - --use-auth-secret
+      - --static-auth-secret=via-dev-turn-secret
+      - --realm=via.local
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --external-ip=127.0.0.1
+      - --log-file=stdout
+      - --simple-log
+      - --no-cli
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      # A bounded relay range: enough for a handful of dev transfers, and small
+      # enough to publish, which the default 49152-65535 is not.
+      - "49160-49200:49160-49200/udp"
+    healthcheck:
+      test: ["CMD", "turnutils_stunclient", "-p", "3478", "127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12

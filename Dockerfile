@@ -7,17 +7,25 @@ WORKDIR /app
 # Copy package.json and package-lock.json to the working directory
 COPY package*.json ./
 
-# Install app dependency
+# Install all dependencies (devDependencies included: the build needs tsc)
 RUN npm ci
 
 # Copy everything into docker
 COPY . .
 
-# Build once
+# Build once (tsc)
 RUN npm run build
+
+# Production must be set after the build: with NODE_ENV=production before
+# `npm ci`, devDependencies would be skipped and the build would fail. It also
+# keeps pino-pretty and Express' stack-trace error output out of production.
+ENV NODE_ENV=production
 
 # Set port
 ENV PORT=3000
+
+# Run as the unprivileged user shipped with the image
+USER node
 
 # Expose port
 EXPOSE 3000

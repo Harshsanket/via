@@ -74,14 +74,14 @@ temp/
 docker-data/
 
 # =========================
-# Prisma / ORM (optional)
+# Build artifacts
 # =========================
-prisma/migrations/
 **/generated/
 
 # =========================
 # Files & Folders
 # =========================
+# Local planning/notes written by coding assistants; not part of the project
 docs/
-test/
-.gitignore
+.freebuff/
+# test/ is versioned: CI runs it alongside the integration services

@@ -1,5 +1,6 @@
 import { redisClient } from "./index.js";
 import { logger } from "../../utils/logger.js";
+import { NO_SESSION, peerStorageKey } from "./constants.js";
 import { Level } from "./types.js";
 
 export const isValidString = (value: unknown): value is string => {
@@ -24,22 +25,25 @@ export const redisKeyExists = async (key: string): Promise<boolean> => {
   return (await redisClient.exists(key)) === 1;
 };
 
-export const getPeerInfo = async (
-  key: string,
+/**
+ * Resolves the session a peer currently belongs to.
+ *
+ * Returns null for both "unknown peer" and the `NOT_IN_SESSION` placeholder,
+ * which used to be read back as if it were a session id.
+ */
+export const getPeerSessionId = async (
+  peerId: string,
   context: string,
-): Promise<string> => {
-  if (!areValidStrings(key, context)) {
+): Promise<string | null> => {
+  if (!areValidStrings(peerId, context)) {
     logger.error(
-      `[VALIDATION] :: [ERROR] :: [getPeerInfo] :: KEY OR CONTEXT INVALID TYPE :: ${key}`,
+      `[VALIDATION] :: [ERROR] :: [getPeerSessionId] :: KEY OR CONTEXT INVALID TYPE :: ${peerId}`,
     );
     throw new Error("invalid type");
   }
 
-  const value = await redisClient.get(key);
-  if (value === null) {
-    logger.error(`[REDIS] :: [${context}] :: KEY NOT FOUND :: ${key}`);
-    throw new Error("key not found");
-  }
+  const value = await redisClient.get(peerStorageKey(peerId));
+  if (!value || value === NO_SESSION) return null;
   return value;
 };
 
@@ -61,15 +65,16 @@ export const logRedis = (
   message?: string,
   meta?: unknown,
 ): void => {
+  const payload =
+    meta === undefined ? {} : meta instanceof Error ? { err: meta } : { meta };
+
   if (level === "error") {
-    logger.error(`[REDIS] :: [ERROR] :: [${context}] :: ${message} :: ${meta}`);
+    logger.error(payload, `[REDIS] :: [ERROR] :: [${context}] :: ${message}`);
   }
   if (level === "success") {
-    logger.info(
-      `[REDIS] :: [SUCCESS] :: [${context}] :: ${message} :: ${meta}`,
-    );
+    logger.info(payload, `[REDIS] :: [SUCCESS] :: [${context}] :: ${message}`);
   }
   if (level === "warn") {
-    logger.warn(`[REDIS] :: [WARN] :: [${context}] :: ${message} :: ${meta}`);
+    logger.warn(payload, `[REDIS] :: [WARN] :: [${context}] :: ${message}`);
   }
 };

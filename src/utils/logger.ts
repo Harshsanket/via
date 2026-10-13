@@ -1,3 +1,6 @@
+// Loaded here so every entry point reads the environment before the logger is
+// constructed, no matter which module imports it first.
+import "dotenv/config";
 import pino from "pino";
 
 const isDev = process.env.NODE_ENV !== "production";

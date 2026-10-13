@@ -1,7 +1,9 @@
 import { createClient } from "redis";
+import { env, redactUrl } from "../env.js";
 import { logRedis } from "./utils.js";
 
-export const redisClient = createClient({ url: process.env.REDIS_URL });
+export const redisClient = createClient({ url: env.redisUrl });
+
 // server
 export const connectRedis = async (): Promise<void> => {
   try {
@@ -26,7 +28,7 @@ export const connectRedis = async (): Promise<void> => {
         "success",
         "connectRedis",
         "CLIENT CONNECTION SUCCESSFUL",
-        process.env.REDIS_URL,
+        redactUrl(env.redisUrl),
       );
     } else {
       logRedis("error", "connectRedis: [result]", "UNABLE TO PING CLIENT");

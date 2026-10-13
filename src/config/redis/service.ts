@@ -1,11 +1,10 @@
+import { ApiError } from "../../utils/api-error.js";
+import { env } from "../env.js";
 import { redisClient } from "./index.js";
 import type {
   SessionID,
   PeerID,
-  MaxAllowedPeers,
-  CurrentPeers,
   SessionParams,
-  SessionData,
   FileMetaData,
   TTLMeta,
 } from "./types.js";
@@ -13,227 +12,209 @@ import { SessionStatus } from "./types.js";
 import {
   SESSION_TTL,
   REFRESH_SESSION_TTL,
-  createSessionObject,
   NO_SESSION,
+  NO_FILE_SELECTED,
+  SESSION_FIELDS,
+  createSessionObject,
+  peerSessionCountKey,
+  peerStorageKey,
+  sessionStorageKey,
 } from "./constants.js";
 import {
+  runJoinSessionScript,
+  runLeaveSessionScript,
+  type JoinSessionResult,
+  type LeaveSessionResult,
+} from "./scripts.js";
+import {
   assertValidStrings,
-  getPeerInfo,
+  getPeerSessionId,
   logRedis,
   redisKeyExists,
 } from "./utils.js";
 
-// register peer - [sockt] - index -> initSocket -> connection
+const F = SESSION_FIELDS;
+
+/**
+ * A session may be extended by activity, but never past the absolute cap: the
+ * granted TTL is always the smaller of the requested one and the remaining
+ * lifetime.
+ */
+const remainingLifetime = (): number => env.sessionMaxLifetimeSeconds;
+
+const releasePeerSessionSlot = async (peerId: PeerID): Promise<void> => {
+  const key = peerSessionCountKey(peerId);
+  if (!(await redisKeyExists(key))) return;
+
+  const remaining = await redisClient.decr(key);
+  if (remaining <= 0) await redisClient.del(key);
+};
+
+// register peer - [socket] - index -> initSocket -> connection
 export const registerPeer = async (peerId: PeerID): Promise<void> => {
   assertValidStrings([peerId], "registerPeer");
 
-  const isPeerAlreadyExists = await redisKeyExists(peerId);
-  if (isPeerAlreadyExists) {
-    logRedis(
-      "error",
-      "registerPeer::[redisKeyExists]",
-      "PEER ID ALREADY EXIST",
-      peerId,
-    );
-    throw new Error("peer already exists");
-  }
-
   try {
-    await redisClient.set(peerId, NO_SESSION, { EX: SESSION_TTL });
+    // Idempotent: a peer re-registering simply gets a fresh placeholder.
+    await redisClient.set(peerStorageKey(peerId), NO_SESSION, {
+      EX: SESSION_TTL,
+    });
     logRedis("success", "registerPeer", "REGISTERED NEW PEER", peerId);
   } catch (error) {
     logRedis("error", "registerPeer", "ERROR WHILE REGISTERING PEER", error);
-    throw new Error("something went wrong");
+    throw new ApiError(500, "unable to register peer");
   }
 };
 
 // create session - [socket] session.ts -> [handleSessions] -> [create-session]
+/** Returns the TTL actually granted to the session, in seconds. */
 export const createSession = async ({
   sessionId,
   peerId,
-}: SessionParams): Promise<void> => {
+}: SessionParams): Promise<number> => {
   assertValidStrings([sessionId, peerId], "createSession");
 
-  try {
-    const getPeerStatus = await getPeerInfo(peerId, "createSession");
-    if (getPeerStatus !== NO_SESSION) {
-      logRedis(
-        "error",
-        "createSession::[getPeerInfo]",
-        "PEER ALREADY IN SESSION",
-        peerId,
-      );
-      throw new Error("peer already in session");
-    }
+  const existingSession = await getPeerSessionId(peerId, "createSession");
+  if (existingSession) {
+    logRedis(
+      "error",
+      "createSession::[getPeerSessionId]",
+      "PEER ALREADY IN SESSION",
+      peerId,
+    );
+    throw new ApiError(409, "peer already in session");
+  }
 
-    const session = createSessionObject(peerId); // create session obj
+  // INCR is atomic, so two concurrent creates cannot both pass the limit.
+  const ownedSessions = await redisClient.incr(peerSessionCountKey(peerId));
+  if (ownedSessions > env.maxActiveSessionsPerPeer) {
+    await redisClient.decr(peerSessionCountKey(peerId));
+    logRedis(
+      "error",
+      "createSession::[peerSessionCount]",
+      "TOO MANY ACTIVE SESSIONS",
+      peerId,
+    );
+    throw new ApiError(429, "too many active sessions");
+  }
+
+  const sessionTtl = Math.max(1, Math.min(SESSION_TTL, remainingLifetime()));
+  const peerTtl = Math.max(
+    1,
+    Math.min(REFRESH_SESSION_TTL, remainingLifetime()),
+  );
+
+  try {
+    const session = createSessionObject(peerId);
     await redisClient
       .multi()
-      .hSet(sessionId, session) // store session details
-      .expire(sessionId, SESSION_TTL) // set session ttl
-      .set(peerId, sessionId, { KEEPTTL: true }) // map peer to session with new ttl
+      .hSet(sessionStorageKey(sessionId), session) // store session details
+      .expire(sessionStorageKey(sessionId), sessionTtl) // set session ttl
+      .set(peerStorageKey(peerId), sessionId, { EX: peerTtl }) // map peer to session
+      .expire(peerSessionCountKey(peerId), peerTtl)
       .exec();
 
     logRedis("success", "createSession", "SESSION CREATED", {
-      "SESSION :": sessionId,
-      "PEER :": peerId,
+      SESSION: sessionId,
+      PEER: peerId,
+      TTL: sessionTtl,
     });
+
+    return sessionTtl;
   } catch (error) {
+    // Do not burn the peer's session slot when creation fails.
+    await redisClient.decr(peerSessionCountKey(peerId)).catch(() => undefined);
     logRedis("error", "createSession", "ERROR WHILE STORING SESSION", error);
-    throw error;
+    throw new ApiError(500, "unable to create session");
   }
 };
 
 // join session - [socket] session.ts -> [handleSessions] -> [join-session]
+/**
+ * Atomic: existence, limit, idempotent rejoin, membership and TTLs are applied
+ * inside one Lua script, so it also returns the session's granted TTL.
+ */
 export const joinSession = async ({
   sessionId,
   peerId,
-}: SessionParams): Promise<void> => {
+}: SessionParams): Promise<{ connectedPeers: number; ttlSeconds: number }> => {
   assertValidStrings([sessionId, peerId], "joinSession");
 
+  let result: JoinSessionResult;
   try {
-    // get session data
-    const sessionData: SessionData = await redisClient.hGetAll(sessionId);
-    if (!sessionData || Object.keys(sessionData).length === 0) {
-      logRedis(
-        "error",
-        "joinSession::[sessionData]",
-        "SESSION NOT FOUND FOR",
-        sessionData,
-      );
-      throw new Error("session not found");
-    }
-
-    const maxAllowedPeers: MaxAllowedPeers = parseInt(
-      sessionData.maxAllowedPeers,
-      10,
-    );
-    if (isNaN(maxAllowedPeers) || maxAllowedPeers <= 0) {
-      logRedis(
-        "error",
-        "joinSession::[maxAllowedPeers]",
-        "MAX ALLOWED PEERS INVALID",
-        sessionData.maxAllowedPeers,
-      );
-      throw new Error("peers invalid");
-    }
-
-    const currentPeers: CurrentPeers = parseInt(
-      sessionData.connectedPeers ?? "0",
-      10,
-    );
-    if (currentPeers >= maxAllowedPeers) {
-      logRedis("error", "joinSession::[currentPeers]", "SESSION FULL", {
-        "CURRENT PEER COUNT": currentPeers,
-        "MAX PEER COUNT": maxAllowedPeers,
-      });
-      throw new Error("session limit reached");
-    }
-
-    await redisClient
-      .multi()
-      .hSet(sessionId, "connectedPeer", peerId)
-      .hSet(sessionId, "lastActivity", Date.now().toString())
-      .exec();
-
-    logRedis("success", "joinSession", "PEER JOINED SESSION", sessionId);
+    result = await runJoinSessionScript({
+      sessionId,
+      peerId,
+      desiredTtlSeconds: REFRESH_SESSION_TTL,
+      maxLifetimeSeconds: remainingLifetime(),
+    });
   } catch (error) {
     logRedis("error", "joinSession", "ERROR JOINING SESSION", error);
-    throw new Error("something went wrong");
-  }
-};
-
-// refresh ttl - [socket] session.ts -> [handleSessions] -> [join-session]
-export const refreshSessionTTL = async (
-  sessionId: SessionID,
-): Promise<void> => {
-  assertValidStrings([sessionId], "refreshSessionTTL");
-
-  const [createdBy, connectedPeer] = await redisClient.hmGet(sessionId, [
-    "createdBy",
-    "connectedPeer",
-  ]);
-
-  if (!createdBy || !connectedPeer) {
-    logRedis("error", "refreshSessionTTL", "SESSION NOT FOUND", sessionId);
-    throw new Error("session not found");
+    throw new ApiError(500, "unable to join session");
   }
 
-  const ttl = await redisClient.ttl(sessionId);
-  if (ttl <= 0) {
-    logRedis("error", "refreshSessionTTL", "SESSION EXPIRED", sessionId);
-    throw new Error("session TTL expired");
-  }
-
-  try {
-    await redisClient
-      .multi()
-      .hSet(sessionId, "lastActivity", Date.now().toString())
-      .expire(sessionId, REFRESH_SESSION_TTL)
-      .expire(connectedPeer, REFRESH_SESSION_TTL)
-      .expire(createdBy, REFRESH_SESSION_TTL)
-      .exec();
-
-    logRedis("success", "refreshSessionTTL", "SESSION REFRESHED", sessionId);
-  } catch (error) {
-    logRedis("error", "refreshSessionTTL", "ERROR WHILE REFRESHING TTL", error);
-    throw new Error("something went wrong");
+  switch (result.status) {
+    case "ok":
+      logRedis("success", "joinSession", "PEER JOINED SESSION", {
+        SESSION: sessionId,
+        PEERS: result.connectedPeers,
+        TTL: result.ttlSeconds,
+      });
+      return {
+        connectedPeers: result.connectedPeers,
+        ttlSeconds: result.ttlSeconds,
+      };
+    case "full":
+      logRedis("error", "joinSession", "SESSION FULL", sessionId);
+      throw new ApiError(409, "session is full");
+    case "misconfigured":
+      logRedis("error", "joinSession", "MAX ALLOWED PEERS INVALID", sessionId);
+      throw new ApiError(500, "session is misconfigured");
+    case "expired":
+      logRedis(
+        "error",
+        "joinSession",
+        "SESSION PAST ITS MAX LIFETIME",
+        sessionId,
+      );
+      throw new ApiError(404, "session expired or invalid");
+    default:
+      logRedis("error", "joinSession", "SESSION NOT FOUND", sessionId);
+      throw new ApiError(404, "session expired or invalid");
   }
 };
 
 // get file metadata - [socket] session.ts -> [handleSessions] -> [get-file-metadata]
 export const getFileMetadata = async (
   sessionId: SessionID,
-): Promise<FileMetaData> => {
+): Promise<FileMetaData | null> => {
   assertValidStrings([sessionId], "getFileMetadata");
 
-  try {
-    const metadata = await redisClient.hGetAll(sessionId);
-    if (!metadata || Object.keys(metadata).length === 0) {
-      logRedis(
-        "error",
-        "getFileMetadata",
-        " NO METADATA FOUND FOR SESSION",
-        sessionId,
-      );
-      throw new Error("metadata not found");
-    }
-
-    const fileName = metadata.fileName;
-    const mimeType = metadata.mimeType;
-    const fileSize = Number(metadata.fileSize);
-
-    if (!fileName || !mimeType || !fileSize) {
-      logRedis(
-        "error",
-        "getFileMetadata",
-        "INVALID METADATA FOR SESSION",
-        sessionId,
-      );
-      throw new Error("Corrupted metadata");
-    }
-
-    logRedis(
-      "success",
-      "getFileMetadata",
-      "METADATA RETRIEVED FOR SESSION",
-      sessionId,
-    );
-
-    return {
-      fileName,
-      mimeType,
-      fileSize,
-    };
-  } catch (error) {
-    logRedis(
-      "error",
-      "getFileMetadata",
-      "ERROR WHILE FETCHING METADATA",
-      sessionId,
-    );
-    throw new Error("something went wrong");
+  const metadata = await redisClient.hGetAll(sessionStorageKey(sessionId));
+  if (!metadata || Object.keys(metadata).length === 0) {
+    logRedis("warn", "getFileMetadata", "NO SESSION FOUND FOR", sessionId);
+    return null;
   }
+
+  const fileName = metadata[F.fileName];
+  const mimeType = metadata[F.mimeType];
+  const fileSize = Number(metadata[F.fileSize]);
+
+  // A session exists before the sender picks a file. That is "not ready yet",
+  // not a corrupted record, and the placeholder must not leak as a filename.
+  if (
+    !fileName ||
+    fileName === NO_FILE_SELECTED ||
+    !mimeType ||
+    mimeType === NO_FILE_SELECTED ||
+    !Number.isFinite(fileSize) ||
+    fileSize <= 0
+  ) {
+    logRedis("warn", "getFileMetadata", "FILE NOT SELECTED YET FOR", sessionId);
+    return null;
+  }
+
+  return { fileName, mimeType, fileSize };
 };
 
 // check session - [webrtc] -> [handleWebRTC] -> [offer] [answer] [ice-candidate]
@@ -241,32 +222,38 @@ export const isSessionExist = async (
   sessionId: SessionID,
 ): Promise<boolean> => {
   assertValidStrings([sessionId], "isSessionExist");
-  return (await redisClient.exists(sessionId)) === 1;
+  return redisKeyExists(sessionStorageKey(sessionId));
 };
 
-// store file metadata - [webrtc] -> [handleWebRTC] -> [file-metadata]
+// store file metadata - [socket] session.ts -> [handleSessions] -> [store-file-metadata]
 export const storeFileMetadata = async (
   sessionId: SessionID,
   { fileName, mimeType, fileSize }: FileMetaData,
-): Promise<void> => {
+): Promise<FileMetaData> => {
   assertValidStrings([sessionId], "storeFileMetadata");
 
-  if (!fileName || !mimeType || typeof fileSize !== "number" || fileSize <= 0) {
+  if (
+    !fileName ||
+    !mimeType ||
+    typeof fileSize !== "number" ||
+    !Number.isFinite(fileSize) ||
+    fileSize <= 0
+  ) {
     logRedis(
       "error",
       "storeFileMetadata",
       "INVALID METADATA FOR SESSION",
       sessionId,
     );
-    throw new Error("invalid file metadata");
+    throw new ApiError(400, "invalid file metadata");
   }
 
   try {
     await redisClient
       .multi()
-      .hSet(sessionId, "fileName", fileName)
-      .hSet(sessionId, "mimeType", mimeType)
-      .hSet(sessionId, "fileSize", fileSize.toString())
+      .hSet(sessionStorageKey(sessionId), F.fileName, fileName)
+      .hSet(sessionStorageKey(sessionId), F.mimeType, mimeType)
+      .hSet(sessionStorageKey(sessionId), F.fileSize, fileSize.toString())
       .exec();
 
     logRedis(
@@ -275,6 +262,8 @@ export const storeFileMetadata = async (
       "STORED METADATA FOR SESSION",
       sessionId,
     );
+
+    return { fileName, mimeType, fileSize };
   } catch (error) {
     logRedis(
       "error",
@@ -282,61 +271,51 @@ export const storeFileMetadata = async (
       "ERROR WHILE STORING METADATA",
       error,
     );
-    throw new Error("something went wrong");
+    throw new ApiError(500, "unable to store file metadata");
   }
 };
 
-//check ttl
+// check ttl - kept so clients can still ask, but `session:expiring` is the
+// supported way to learn about expiry.
 export const getSessionTTL = async (
   sessionId: SessionID,
   peerId: PeerID,
 ): Promise<TTLMeta> => {
   assertValidStrings([sessionId, peerId], "getSessionTTL");
 
-  try {
-    const [[createdAt, createdBy, connectedPeer], ttl] = await Promise.all([
-      redisClient.hmGet(sessionId, ["createdAt", "createdBy", "connectedPeer"]),
-      redisClient.ttl(sessionId),
-    ]);
-    console.log("GET SESSION TTL PEER ID", peerId);
-    console.log("GET SESSION TTL CREATED AT", createdAt);
-    console.log("GET SESSION TTL CREATED BY", createdBy);
-    console.log("GET SESSION TTL CONNECTED PEER", connectedPeer);
+  const [[createdAt, createdBy, connectedPeer], ttl] = await Promise.all([
+    redisClient.hmGet(sessionStorageKey(sessionId), [
+      F.createdAt,
+      F.createdBy,
+      F.connectedPeer,
+    ]),
+    redisClient.ttl(sessionStorageKey(sessionId)),
+  ]);
 
-    const isValidPeer = peerId === connectedPeer || peerId === createdBy;
-
-    if (!isValidPeer) {
-      logRedis("error", "getSessionTTL", "INVALID PEER", peerId);
-      throw new Error("invalid request");
-    }
-
-    logRedis("success", "getSessionTTL", "FETCHING TTL", {
-      TTL: ttl,
-      SESSION: sessionId,
-    });
-
-    if (ttl === -2 || !createdAt) {
-      logRedis("error", "getSessionTTL", "SESSION NOT FOUND", sessionId);
-      return { exists: false, createdAt: null, ttl: null };
-    }
-
-    return {
-      exists: true,
-      createdAt,
-      ttl: ttl === -1 ? null : ttl,
-    };
-  } catch (error) {
-    logRedis(
-      "error",
-      "getSessionTTL",
-      "ERROR WHILE GETTING SESSION TTL",
-      error,
-    );
-    throw new Error("something went wrong");
+  const isValidPeer = peerId === connectedPeer || peerId === createdBy;
+  if (!isValidPeer) {
+    logRedis("error", "getSessionTTL", "INVALID PEER", peerId);
+    throw new ApiError(403, "invalid request");
   }
+
+  if (ttl === -2 || !createdAt) {
+    logRedis("error", "getSessionTTL", "SESSION NOT FOUND", sessionId);
+    return { exists: false, createdAt: null, ttl: null };
+  }
+
+  logRedis("success", "getSessionTTL", "FETCHING TTL", {
+    TTL: ttl,
+    SESSION: sessionId,
+  });
+
+  return {
+    exists: true,
+    createdAt,
+    ttl: ttl === -1 ? null : ttl,
+  };
 };
 
-// change transfer status - [webrtc] -> [handleWebRTC] -> [transfer-complete] [transfer-error]
+// change transfer status - [socket] session.ts -> [handleSessions] -> [transfer-complete] [transfer-error]
 export const changeTransferStatus = async (
   sessionId: SessionID,
   status: SessionStatus,
@@ -346,12 +325,12 @@ export const changeTransferStatus = async (
   try {
     await redisClient
       .multi()
-      .hSet(sessionId, "lastActivity", Date.now().toString())
-      .hSet(sessionId, "status", status.toLowerCase())
+      .hSet(sessionStorageKey(sessionId), F.lastActivity, Date.now().toString())
+      .hSet(sessionStorageKey(sessionId), F.status, status.toLowerCase())
       .exec();
 
     logRedis("success", "changeTransferStatus", "CHANGED TRANSFER STATUS", {
-      STAUS: status,
+      STATUS: status,
       SESSION: sessionId,
     });
   } catch (error) {
@@ -361,133 +340,72 @@ export const changeTransferStatus = async (
       "ERROR WHILE CHANGING TRANSFER STATUS",
       error,
     );
-    throw new Error("something went wrong");
-  }
-};
-
-// decrease peers count - [webrtc] -> [handleWebRTC] -> [disconnecting]
-export const decreasePeersCount = async (
-  sessionId: SessionID,
-): Promise<void> => {
-  assertValidStrings([sessionId], "decreasePeersCount");
-
-  try {
-    const isSessionExist = redisKeyExists(sessionId);
-    if (!isSessionExist) {
-      logRedis("error", "decreasePeersCount", "SESSION NOT FOUND", sessionId);
-      throw new Error("Session does not exist");
-    }
-
-    const count = await redisClient.hGet(sessionId, "connectedPeers");
-    const currentCount = count ? Number(count) : 0;
-
-    if (currentCount < 0) return;
-
-    await redisClient
-      .multi()
-      .hSet(sessionId, "lastActivity", Date.now().toString())
-      .hIncrBy(sessionId, "connectedPeers", -1)
-      .exec();
-    logRedis(
-      "success",
-      "decreasePeersCount",
-      "DECREASING PEER COUNT FOR SESSION",
-      sessionId,
-    );
-  } catch (error) {
-    logRedis(
-      "error",
-      "decreasePeersCount",
-      "ERROR WHILE DECREASING PEER COUNT",
-      error,
-    );
-    throw new Error("something went wrong");
-  }
-};
-
-// get connected peers
-export const getConnectedPeers = async (
-  sessionId: SessionID,
-): Promise<number> => {
-  assertValidStrings([sessionId], "getConnectedPeers");
-
-  try {
-    const count = await redisClient.hGet(sessionId, "connectedPeers");
-    logRedis(
-      "success",
-      "getConnectedPeers",
-      "FETCHED PEER COUNT FOR ",
-      sessionId,
-    );
-    return count ? Number(count) : 0;
-  } catch (error) {
-    logRedis("error", "getConnectedPeers", "ERROR GETTING PEERS", error);
-    throw new Error("something went wrong");
+    throw new ApiError(500, "unable to change transfer status");
   }
 };
 
 // cleanup session - [socket] - index -> [initsocket] -> [disconnect]
-export const cleanupOnDisconnect = async (peerId: PeerID): Promise<void> => {
+/**
+ * Leaving is atomic and idempotent: the creator's departure tears the session
+ * down and evicts the member's mapping, a member's departure only frees their
+ * slot. Calling it twice for the same peer cannot double count.
+ */
+export const cleanupOnDisconnect = async (
+  peerId: PeerID,
+): Promise<LeaveSessionResult & { sessionId: string }> => {
   assertValidStrings([peerId], "cleanupOnDisconnect");
 
-  try {
-    const sessionId = await redisClient.get(peerId);
-    if (!sessionId) {
-      logRedis(
-        "error",
-        "cleanupOnDisconnect",
-        "SESSION_ID NOT FOUND",
-        sessionId,
-      );
-      throw new Error("sessionId invalid");
-    }
+  const sessionId = await getPeerSessionId(peerId, "cleanupOnDisconnect");
+  if (!sessionId) {
+    // The placeholder is not a session id: just drop the peer key.
+    await redisClient.del(peerStorageKey(peerId));
+    logRedis("warn", "cleanupOnDisconnect", "PEER HAD NO SESSION", peerId);
+    return {
+      status: "no-session",
+      connectedPeers: 0,
+      memberId: "",
+      sessionId: "",
+    };
+  }
 
-    // check who created the session
-    const createdBy = await redisClient.hGet(sessionId, "createdBy");
-    if (!createdBy) {
-      logRedis("error", "cleanupOnDisconnect", "PEER DOES NOT HAVE SESSION", {
+  let result: LeaveSessionResult;
+  try {
+    result = await runLeaveSessionScript({ sessionId, peerId });
+  } catch (error) {
+    logRedis("error", "cleanupOnDisconnect", "ERROR WHILE CLEANING UP", {
+      PEER: peerId,
+      error,
+    });
+    throw new ApiError(500, "unable to clean up peer");
+  }
+
+  try {
+    if (result.status === "deleted") {
+      await releasePeerSessionSlot(peerId);
+      logRedis("success", "cleanupOnDisconnect", "SESSION CLOSED BY CREATOR", {
+        SESSION: sessionId,
+        MEMBER_EVICTED: result.memberId || "(none)",
+      });
+    } else if (result.status === "left") {
+      logRedis("success", "cleanupOnDisconnect", "PEER LEFT SESSION", {
+        SESSION: sessionId,
+        PEERS: result.connectedPeers,
+      });
+    } else {
+      await releasePeerSessionSlot(peerId);
+      logRedis("warn", "cleanupOnDisconnect", "SESSION ALREADY GONE", {
         PEER: peerId,
         SESSION: sessionId,
       });
     }
-
-    const pipeline = redisClient.multi();
-
-    // delete session
-    if (createdBy === peerId) pipeline.del(sessionId);
-
-    // delete peer mapping
-    pipeline.del(peerId);
-
-    await pipeline.exec();
-
-    logRedis(
-      "success",
-      "cleanupOnDisconnect",
-      "CLOSED ALL SESSIONS FOR PEER",
-      peerId,
-    );
   } catch (error) {
-    logRedis(
-      "error",
-      "cleanupOnDisconnect",
-      "ERROR WHILE CLEANING ON DISCONNECT FOR",
-      { PEER: peerId, error },
-    );
-    throw new Error("something went wrong");
+    // The state change already happened; a bookkeeping failure must not make
+    // the disconnect handler report an error to a client that has gone away.
+    logRedis("error", "cleanupOnDisconnect", "BOOKKEEPING FAILED", {
+      PEER: peerId,
+      error,
+    });
   }
-};
 
-// delete session
-export const deleteSession = async (sessionId: SessionID): Promise<void> => {
-  assertValidStrings([sessionId], "deleteSession");
-
-  try {
-    await redisClient.hIncrBy(sessionId, "createdSessions", -1);
-    await redisClient.del(sessionId);
-    logRedis("success", "deleteSession", "SESSION DELETED", sessionId);
-  } catch (error) {
-    logRedis("error", "deleteSession", "ERROR WHILE DELETING SESSION", error);
-    throw new Error("something went wrong");
-  }
+  return { ...result, sessionId };
 };

@@ -56,16 +56,12 @@ temp/
 
 
 # =========================
-# Prisma / ORM (optional)
-# =========================
-prisma/migrations/
-**/generated/
-
-# =========================
 # Files & Folders
 # =========================
 docs/
 test/
+scripts/
+.github/
 
 # =========================
 # Docker

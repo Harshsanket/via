@@ -1,3 +1,5 @@
+// Wire contract for the signaling events. These mirror the validated payloads
+// in src/config/socket/utils.ts.
 export interface OfferPayload {
   sessionId: string;
   offer: RTCSessionDescriptionInit;
@@ -10,7 +12,8 @@ export interface AnswerPayload {
 
 export interface IceCandidatePayload {
   sessionId: string;
-  candidate: RTCIceCandidateInit;
+  /** null signals "end of candidates" and is legal to relay. */
+  candidate: RTCIceCandidateInit | null;
 }
 
 export interface TransferCompletePayload {
@@ -20,7 +23,7 @@ export interface TransferCompletePayload {
 
 export interface TransferErrorPayload {
   sessionId: string;
-  message: string;
+  message?: string;
 }
 
 export type Level = "error" | "info" | "success" | "warn";

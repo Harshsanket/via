@@ -1,373 +1,274 @@
-import { Server, Socket } from "socket.io";
+import { ApiError } from "../../utils/api-error.js";
 import {
   changeTransferStatus,
   createSession,
-  decreasePeersCount,
   getFileMetadata,
   getSessionTTL,
-  isSessionExist,
   joinSession,
-  refreshSessionTTL,
   storeFileMetadata,
 } from "../redis/service.js";
-import { isCallback, logSocket } from "./utils.js";
-import { areValidStrings } from "../../utils/validators.js";
-import {
+import { SessionStatus } from "../redis/types.js";
+import { scheduleSessionExpiry } from "./expiry.js";
+import type {
   TransferCompletePayload,
   TransferErrorPayload,
-} from "config/webrtc/types.js";
-import { SessionStatus } from "../redis/types.js";
+} from "../webrtc/types.js";
+import type {
+  CreateSessionResponse,
+  JoinSessionPayload,
+  JoinSessionResponse,
+  TransferResponse,
+  ViaSocket,
+} from "./types.js";
+import {
+  assertSessionAccess,
+  logSocket,
+  parseGetFileMetadataPayload,
+  parseJoinSessionPayload,
+  parseSessionPayload,
+  parseStoreFileMetadataPayload,
+  parseTransferCompletePayload,
+  parseTransferErrorPayload,
+  registerHandler,
+  registerSafeListener,
+} from "./utils.js";
 
-export const handleSessions = (io: Server, socket: Socket): void => {
+export const handleSessions = (socket: ViaSocket): void => {
   // create session
-  socket.on("create-session", async (callback) => {
-    const ctx = "handleSessions:[create-session]";
-    logSocket("info", "handleSessions:[create-session]", `FROM ${socket.id}`);
+  registerHandler<Record<string, never>, CreateSessionResponse>(
+    socket,
+    "create-session",
+    {
+      context: "handleSessions:[create-session]",
+      requireAck: true,
+      internalErrorMessage: "session creation failed",
+      parse: () => ({}) as Record<string, never>,
+      handle: async (_payload, ack) => {
+        const sessionId = crypto.randomUUID();
 
-    if (!isCallback(callback)) {
-      logSocket("error", ctx, "INVALID CALLBACK");
-      callback({ success: false, message: "session creation failed" });
-      return;
-    }
-
-    try {
-      const sessionId = crypto.randomUUID();
-      const createSessionParam = {
-        sessionId,
-        peerId: socket.id,
-      };
-
-      await createSession(createSessionParam);
-
-      socket.join(sessionId);
-
-      callback({
-        success: true,
-        sessionId,
-      });
-      logSocket(
-        "success",
-        ctx,
-        `SESSION CREATED BY PEER :: ${socket.id} ::`,
-        sessionId,
-      );
-    } catch (error) {
-      logSocket("error", ctx, "ERROR WHILE CREATING SESSION", error);
-      callback({ success: false, message: "session creation failed" });
-    }
-  });
-
-  // join session
-  socket.on("join-session", async ({ sessionId }, callback) => {
-    const ctx = "handleSessions:[join-session]";
-    logSocket("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
-
-    if (!isCallback(callback)) {
-      logSocket("error", ctx, "INVALID CALLBACK");
-      callback({ success: false, message: "session joining failed" });
-      return;
-    }
-
-    if (!areValidStrings(sessionId)) {
-      logSocket("error", ctx, "INVALID SESSION_ID");
-      callback({ success: false, message: "session id invalid" });
-      return;
-    }
-
-    try {
-      const sessionExists = await isSessionExist(sessionId);
-      if (!sessionExists) {
-        logSocket("error", ctx, "SESSION DOES NOT EXIST");
-        callback({ success: false, message: "session expired or invalid" });
-        return;
-      }
-
-      const joinSessionParam = {
-        sessionId,
-        peerId: socket.id,
-      };
-
-      await joinSession(joinSessionParam);
-      socket.join(sessionId);
-      socket.to(sessionId).emit("peer-joined");
-
-      await refreshSessionTTL(sessionId);
-      const metadata = await getFileMetadata(sessionId);
-
-      callback({ success: true, metadata });
-      logSocket("success", ctx, `PEER JOINED THE SESSION :: ${sessionId}`, {
-        METADATA: metadata,
-      });
-    } catch (error) {
-      logSocket("error", ctx, "ERROR WHILE JOINING SESSION", error);
-      callback({ success: false, message: "failed to join session" });
-    }
-  });
-
-  // get ttl
-  socket.on("get-ttl", async ({ sessionId }) => {
-    const ctx = "handleSessions:[get-ttl]";
-    logSocket("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
-
-    if (!areValidStrings(sessionId)) {
-      logSocket("error", ctx, "INVALID SESSION_ID");
-      socket.emit("session:error", {
-        success: false,
-        message: "invalid session id",
-      });
-      return;
-    }
-
-    try {
-      const session = await isSessionExist(sessionId);
-      if (!session) {
-        logSocket("error", ctx, `SESSION NOT FOUND OR EXPIRED :: ${sessionId}`);
-        socket.emit("session:error", {
-          success: false,
-          message: "session expired or invalid",
+        const ttlSeconds = await createSession({
+          sessionId,
+          peerId: socket.id,
         });
-        return;
-      }
 
-      if (!socket.rooms.has(sessionId)) {
-        logSocket("error", ctx, `SOCKET NOT IN SESSION ROOM :: ${sessionId}`);
-        socket.emit("session:error", {
-          success: false,
-          message: "unauthorized session access",
-        });
-        return;
-      }
+        socket.join(sessionId);
+        scheduleSessionExpiry(sessionId, ttlSeconds);
 
-      const result = await getSessionTTL(sessionId, socket.id);
-      socket.emit("session:ttl", result);
-      logSocket("success", ctx, "TTL FETCHED", result);
-    } catch (error) {
-      logSocket("error", ctx, "ERROR WHILE FETCHING TTL", error);
-      socket.emit("session:error", {
-        success: false,
-        message: "internal server error",
-      });
-    }
-  });
-
-  // store metadata
-  socket.on("store-file-metadata", async ({ sessionId,fileName, mimeType, fileSize }) => {
-    const ctx = "handleSessions:[store-file-metadata]";
-    logSocket("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
-
-    if (!areValidStrings(sessionId)) {
-      logSocket("error", ctx, "INVALID SESSION ID");
-      socket.emit("session:error", {
-        success: false,
-        message: "invalid session id",
-      });
-      return;
-    }
-
-    try {
-      const session = await isSessionExist(sessionId);
-      if (!session) {
-        logSocket("error", ctx, `SESSION NOT FOUND OR EXPIRED :: ${sessionId}`);
-        socket.emit("session:error", {
-          success: false,
-          message: "session expired or invalid",
-        });
-        return;
-      }
-
-      if (!socket.rooms.has(sessionId)) {
-        logSocket("error", ctx, `SOCKET NOT IN SESSION ROOM :: ${sessionId}`);
-        socket.emit("session:error", {
-          success: false,
-          message: "unauthorized session access",
-        });
-        return;
-      }
-
-      const metadata = await storeFileMetadata(sessionId, { fileName, mimeType, fileSize });
-      socket.emit("file-metadata", {
-        success: true,
-        metadata,
-      });
-
-      logSocket("success", ctx, `METADATA SENT TO ${socket.id}`);
-    } catch (error) {
-      logSocket("error", ctx, "ERROR WHILE GETTING FILE METADATA", error);
-      socket.emit("session:error", {
-        success: false,
-        message: "internal server error",
-      });
-    }
-  });
-
-  // get file metadata
-  socket.on("get-file-metadata", async ({ sessionId, peerId }) => {
-    const ctx = "handleSessions:[get-file-metadata]";
-    logSocket("info", ctx, `FROM ${peerId} : FOR SESSION ${sessionId}`);
-
-    if (!areValidStrings(sessionId, peerId)) {
-      logSocket("error", ctx, "SESSION OR PEER ID INVALID");
-      socket.emit("session:error", {
-        success: false,
-        message: "session or filename invalid",
-      });
-    }
-
-    try {
-      const metadata = await getFileMetadata(sessionId);
-      socket.emit("file-metadata", {
-        success: true,
-        metadata,
-      });
-
-      logSocket("success", ctx, `METADATA SENT TO ${peerId}`);
-    } catch (error) {
-      logSocket("error", ctx, "ERROR WHILE GETTING FILE METADATA", error);
-      socket.emit("session:error", {
-        success: false,
-        message: "internal server error",
-      });
-    }
-  });
-
-  // on file transfer completion
-  socket.once(
-    "transfer-complete",
-    async ({ sessionId, fileName }: TransferCompletePayload): Promise<void> => {
-      const ctx = "handleSessions:[transfer-complete]";
-      logSocket("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
-      try {
-        if (!areValidStrings(sessionId, fileName)) {
-          logSocket("error", ctx, "SESSION OR PEER ID INVALID");
-          socket.emit("session:error", {
-            success: false,
-            message: "session or filename invalid",
-          });
-          return;
-        }
-
-        const session = await isSessionExist(sessionId);
-        if (!session) {
-          logSocket("error", ctx, "ERROR GETTING SESSION");
-          socket.emit("session:error", {
-            success: false,
-            message: "Session expired or invalid",
-          });
-          return;
-        }
-
-        if (!socket.rooms.has(sessionId)) {
-          logSocket("error", ctx, "PEER NOT IN SESSION");
-
-          socket.emit("session:error", {
-            success: false,
-            message: "peer not in session",
-          });
-          return;
-        }
-
-        await changeTransferStatus(sessionId, SessionStatus.COMPLETED);
+        ack?.({ success: true, sessionId });
 
         logSocket(
           "success",
-          ctx,
-          `FILE TRANSFER COMPLETE BY SESSION :: ${sessionId}`,
+          "handleSessions:[create-session]",
+          `SESSION CREATED BY PEER :: ${socket.id} ::`,
+          { sessionId, ttlSeconds },
+        );
+      },
+    },
+  );
+
+  // join session
+  registerHandler<JoinSessionPayload, JoinSessionResponse>(
+    socket,
+    "join-session",
+    {
+      context: "handleSessions:[join-session]",
+      requireAck: true,
+      internalErrorMessage: "failed to join session",
+      parse: parseJoinSessionPayload,
+      handle: async ({ sessionId }, ack) => {
+        logSocket(
+          "info",
+          "handleSessions:[join-session]",
+          `FROM ${socket.id} : FOR SESSION ${sessionId}`,
         );
 
-        socket.to(sessionId).emit("transfer-complete", { fileName });
-      } catch (err: unknown) {
-        logSocket("error", ctx, "FILE HANDLER FAILED", err);
-        socket.emit("error", {
-          message: "Internal server error",
+        // joinSession owns existence, limit and idempotency in one atomic script.
+        const { ttlSeconds } = await joinSession({
+          sessionId,
+          peerId: socket.id,
         });
-      }
+
+        socket.join(sessionId);
+        scheduleSessionExpiry(sessionId, ttlSeconds);
+        socket.to(sessionId).emit("peer-joined");
+
+        const metadata = await getFileMetadata(sessionId);
+
+        ack?.({ success: true, metadata });
+
+        logSocket(
+          "success",
+          "handleSessions:[join-session]",
+          `PEER JOINED THE SESSION :: ${sessionId}`,
+          { METADATA: metadata, ttlSeconds },
+        );
+      },
+    },
+  );
+
+  // get ttl - retained for compatibility; clients are expected to rely on the
+  // `session:expiring` push instead of polling this.
+  registerHandler(socket, "get-ttl", {
+    context: "handleSessions:[get-ttl]",
+    parse: parseSessionPayload,
+    handle: async ({ sessionId }) => {
+      logSocket(
+        "info",
+        "handleSessions:[get-ttl]",
+        `FROM ${socket.id} : FOR SESSION ${sessionId}`,
+      );
+
+      await assertSessionAccess(socket, sessionId);
+
+      const result = await getSessionTTL(sessionId, socket.id);
+      socket.emit("session:ttl", result);
+
+      logSocket("success", "handleSessions:[get-ttl]", "TTL FETCHED", result);
+    },
+  });
+
+  // store metadata
+  registerHandler(socket, "store-file-metadata", {
+    context: "handleSessions:[store-file-metadata]",
+    parse: parseStoreFileMetadataPayload,
+    handle: async ({ sessionId, fileName, mimeType, fileSize }) => {
+      logSocket(
+        "info",
+        "handleSessions:[store-file-metadata]",
+        `FROM ${socket.id} : FOR SESSION ${sessionId}`,
+      );
+
+      await assertSessionAccess(socket, sessionId);
+
+      const metadata = await storeFileMetadata(sessionId, {
+        fileName,
+        mimeType,
+        fileSize,
+      });
+
+      socket.emit("file-metadata", { sessionId, success: true, metadata });
+
+      logSocket(
+        "success",
+        "handleSessions:[store-file-metadata]",
+        `METADATA SENT TO ${socket.id}`,
+      );
+    },
+  });
+
+  // get file metadata
+  registerHandler(socket, "get-file-metadata", {
+    context: "handleSessions:[get-file-metadata]",
+    parse: parseGetFileMetadataPayload,
+    handle: async ({ sessionId, peerId }) => {
+      logSocket(
+        "info",
+        "handleSessions:[get-file-metadata]",
+        `FROM ${peerId} : FOR SESSION ${sessionId}`,
+      );
+
+      // Room membership was not checked here, so any socket that knew a
+      // session id could read another session's file details.
+      await assertSessionAccess(socket, sessionId);
+
+      const metadata = await getFileMetadata(sessionId);
+      socket.emit("file-metadata", { sessionId, success: true, metadata });
+
+      logSocket(
+        "success",
+        "handleSessions:[get-file-metadata]",
+        `METADATA SENT TO ${peerId}`,
+      );
+    },
+  });
+
+  // on file transfer completion
+  registerHandler<TransferCompletePayload, TransferResponse>(
+    socket,
+    "transfer-complete",
+    {
+      context: "handleSessions:[transfer-complete]",
+      parse: parseTransferCompletePayload,
+      handle: async ({ sessionId, fileName }, ack) => {
+        logSocket(
+          "info",
+          "handleSessions:[transfer-complete]",
+          `FROM ${socket.id} : FOR SESSION ${sessionId}`,
+        );
+
+        await assertSessionAccess(socket, sessionId, {
+          missing: "session expired or invalid",
+          forbidden: "peer not in session",
+        });
+
+        await changeTransferStatus(sessionId, SessionStatus.COMPLETED);
+
+        // Previously `socket.once`, so a socket could only ever report one
+        // completed transfer for its whole lifetime.
+        socket
+          .to(sessionId)
+          .emit("transfer-complete", { success: true, fileName });
+        ack?.({ success: true, message: "transfer complete" });
+
+        logSocket(
+          "success",
+          "handleSessions:[transfer-complete]",
+          `FILE TRANSFER COMPLETE BY SESSION :: ${sessionId}`,
+        );
+      },
     },
   );
 
   // on error
-  socket.on(
+  registerHandler<TransferErrorPayload, TransferResponse>(
+    socket,
     "transfer-error",
-    async ({ sessionId }: TransferErrorPayload): Promise<void> => {
-      const ctx = "handleTransfer:[transfer-error]";
+    {
+      context: "handleSessions:[transfer-error]",
+      parse: parseTransferErrorPayload,
+      handle: async ({ sessionId }, ack) => {
+        logSocket(
+          "info",
+          "handleSessions:[transfer-error]",
+          `FROM ${socket.id} : FOR SESSION ${sessionId}`,
+        );
 
-      logSocket("info", ctx, `FROM ${socket.id} : FOR SESSION ${sessionId}`);
-
-      try {
-        if (!areValidStrings(sessionId)) {
-          logSocket("error", ctx, "SESSION ID OR MESSAGE INVALID");
-          socket.emit("session:error", {
-            success: false,
-            message: "invalid transfer error payload",
-          });
-          return;
-        }
-
-        const session = await isSessionExist(sessionId);
-        if (!session) {
-          logSocket(
-            "error",
-            ctx,
-            `SESSION NOT FOUND OR EXPIRED :: ${sessionId}`,
-          );
-          socket.emit("session:error", {
-            success: false,
-            message: "session expired or invalid",
-          });
-          return;
-        }
-
-        if (!socket.rooms.has(sessionId)) {
-          logSocket("error", ctx, `SOCKET NOT IN SESSION ROOM :: ${sessionId}`);
-          socket.emit("session:error", {
-            success: false,
-            message: "unauthorized session access",
-          });
-          return;
-        }
+        await assertSessionAccess(socket, sessionId);
 
         await changeTransferStatus(sessionId, SessionStatus.ERROR);
 
         socket.to(sessionId).emit("transfer-error", { success: true });
+        ack?.({ success: true, message: "transfer error recorded" });
+
         logSocket(
           "success",
-          ctx,
+          "handleSessions:[transfer-error]",
           `CHANGED FILE TRANSFER STATUS TO ERROR FOR :: ${sessionId}`,
         );
-      } catch (err: unknown) {
-        logSocket(
-          "error",
-          ctx,
-          `HANDLER FAILED :: SESSION ${sessionId} :: ${err}`,
-        );
-        socket.emit("session:error", {
-          success: false,
-          message: "internal server error",
-        });
-      }
+      },
     },
   );
 
-  // disconneting
-  socket.on("disconnecting", async () => {
-    const ctx = "handleTransfer:[disconnecting]";
+  // disconnecting - notify only. Membership is released atomically by
+  // cleanupOnDisconnect on `disconnect`, so this cannot double count, and the
+  // expiry timers stay untouched because the session may well outlive this
+  // peer (only the creator's departure ends it).
+  registerSafeListener(
+    socket,
+    "disconnecting",
+    "handleSessions:[disconnecting]",
+    () => {
+      for (const roomId of socket.rooms) {
+        if (roomId === socket.id) continue;
 
-    logSocket("info", ctx, "FROM ${socket.id}");
+        socket.to(roomId).emit("peer-left");
 
-    for (const roomId of socket.rooms) {
-      if (roomId === socket.id) continue;
-
-      try {
-        await decreasePeersCount(roomId);
-      } catch (error) {
-        logSocket("error", ctx, "ERROR CHANGING SESSION STATUS");
+        logSocket(
+          "warn",
+          "handleSessions:[disconnecting]",
+          `[DISCONNECTING]:: Peer :: ${socket.id} session :: ${roomId}`,
+        );
       }
-
-      logSocket(
-        "warn",
-        ctx,
-        `[DISCONNECTED]:: Peer :: ${socket.id} session :: ${roomId}`,
-      );
-      socket.to(roomId).emit("peer-left");
-    }
-  });
+    },
+  );
 };

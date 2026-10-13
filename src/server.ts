@@ -1,87 +1,118 @@
-import app from "./app.js";
-import dotenv from "dotenv";
 import { createServer } from "http";
-import { redisClient, connectRedis } from "./config/redis/index.js";
-import { prisma, connectPrisma } from "./database/index.js";
 import { Server } from "socket.io";
+import app from "./app.js";
+import { env, isAllowedOrigin } from "./config/env.js";
+import type {
+  ClientToServerEvents,
+  InterServerEvents,
+  ServerToClientEvents,
+  SocketData,
+} from "./config/socket/types.js";
+import { connectRedis, redisClient } from "./config/redis/index.js";
 import { initSocket } from "./config/socket/index.js";
+import { logTurnConfiguration } from "./config/turn/index.js";
 import { logger } from "./utils/logger.js";
-
-// env config
-dotenv.config({ path: "" });
 
 // server config
 const httpServer = createServer(app);
 
 // socket io config
-const io = new Server(httpServer, {
+const io = new Server<
+  ClientToServerEvents,
+  ServerToClientEvents,
+  InterServerEvents,
+  SocketData
+>(httpServer, {
   cors: {
-    origin: process.env.CLIENT_ORIGIN?.split(","),
+    origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
     credentials: true,
+  },
+  // Signaling payloads are small; the 1 MB default is far more than needed.
+  maxHttpBufferSize: 100_000,
+  serveClient: false,
+  pingInterval: 25_000,
+  pingTimeout: 20_000,
+  // A transport blip (a phone backgrounding Safari) recovers inside this
+  // window without the server ever firing `disconnect`, so the session in
+  // Redis is not torn down underneath a client that is coming back.
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: true,
   },
 });
 
 initSocket(io);
 
-httpServer.listen(process.env.PORT, async () => {
-  // server log
-  logger.info(`[SERVER] :: connected to PORT :: ${process.env.PORT}`);
-
-  // connect redis
-  connectRedis();
-
-  // connect postgres db
-  connectPrisma().catch(async (err) => {
-    logger.warn(`[PRISMA] :: error in prisma main fn :: ${err}`);
-    await prisma.$disconnect();
-    process.exit(1);
-  });
-});
+let shuttingDown = false;
 
 // Handle graceful shutdown
+const shutdownServer = async (
+  signal: string,
+  exitCode: number = 0,
+): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
 
-const shutdownServer = async (signal: string): Promise<void> => {
-  // close server
-  const closeServer = () =>
-    new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error("Server close timeout")),
-        10000,
-      );
-      httpServer.close((err) => {
-        clearTimeout(timeout);
-        if (err) return reject(err);
-        resolve();
-      });
-    });
+  logger.warn(
+    `[SERVER] :: [${signal}] received :: Shutting down gracefully...`,
+  );
+
+  const forceExit = setTimeout(() => {
+    logger.error("[SERVER] :: shutdown timed out :: forcing exit");
+    process.exit(1);
+  }, 10_000);
+  forceExit.unref();
 
   try {
-    // log input
-    logger.warn(
-      `[SERVER] :: [${signal}] received :: Shutting down gracefully...`,
-    );
+    // Closing Socket.IO also closes the underlying HTTP server, so connected
+    // clients are terminated instead of hanging until the process is killed.
+    await io.close();
 
-    // close server
-    closeServer();
+    if (redisClient.isOpen) {
+      logger.info("[REDIS] :: closing client connection");
+      await redisClient.quit();
+    }
 
-    // disconnect db
-    logger.info(`[REDIS] :: [${signal}] received :: Closing client connection`);
-    await redisClient.quit();
-
-    logger.info(
-      `[PRISMA] :: [${signal}] received :: Disconnecting db connection`,
-    );
-    await prisma.$disconnect();
-
-    // finall call
-    logger.info(`[SERVER] :: Cleanup complete. Exiting...`);
-    logger.warn(`SERVER HAS BEEN SHUTDOWN`);
-    process.exit(0);
+    clearTimeout(forceExit);
+    logger.info("[SERVER] :: Cleanup complete. Exiting...");
+    process.exit(exitCode);
   } catch (err) {
-    logger.error(`[SERVER] :: Shutdown error :: ${err}`);
+    logger.error({ err }, "[SERVER] :: Shutdown error");
     process.exit(1);
   }
 };
 
-process.on("SIGINT", () => shutdownServer("SIGINT"));
-process.on("SIGTERM", () => shutdownServer("SIGTERM"));
+const start = async (): Promise<void> => {
+  // Connect dependencies first: the port must not accept traffic before Redis
+  // is usable.
+  await connectRedis();
+
+  // Reported once, so a missing or malformed relay is visible in the logs
+  // instead of surfacing as a client that cannot connect.
+  logTurnConfiguration();
+
+  await new Promise<void>((resolve) => {
+    httpServer.listen(env.port, () => {
+      logger.info(`[SERVER] :: connected to PORT :: ${env.port}`);
+      resolve();
+    });
+  });
+};
+
+start().catch(async (err: unknown) => {
+  logger.error({ err }, "[SERVER] :: failed to start");
+  if (redisClient.isOpen) await redisClient.quit().catch(() => undefined);
+  process.exit(1);
+});
+
+process.on("SIGINT", () => void shutdownServer("SIGINT"));
+process.on("SIGTERM", () => void shutdownServer("SIGTERM"));
+
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: reason }, "[PROCESS] :: unhandled rejection");
+});
+
+process.on("uncaughtException", (error) => {
+  logger.error({ err: error }, "[PROCESS] :: uncaught exception");
+  void shutdownServer("uncaughtException", 1);
+});
