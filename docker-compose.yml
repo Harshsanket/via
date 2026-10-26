@@ -1,0 +1,181 @@
+# Home-network hosting: the site is served at https://$VIA_HOST to every device
+# on the LAN, with a trusted Let's Encrypt certificate and nothing to install.
+# Setup guide: README.md.
+#
+#   cp .env.example .env               # fill in the values
+#   docker compose up -d --build
+#   docker compose logs -f caddy       # wait for "certificate obtained successfully"
+#
+# Nothing here is port-forwarded on the router: the public DuckDNS name only
+# ever resolves to the LAN IP, so the site exists only inside the home network.
+#
+# Each piece runs in its own container with only the access it needs:
+#
+#   LAN ──443──▶ caddy ──edge──▶ web ──app──▶ api ──data──▶ redis
+#                 (TLS)        (nginx +     (signaling)    (sessions)
+#                               frontend)
+#
+# `app` and `data` are internal networks with no route out, so api and redis
+# can't reach the internet, and redis is reachable from api alone.
+name: via
+
+# Settings every service shares: no root filesystem writes, no Linux
+# capabilities, no privilege escalation.
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+services:
+  caddy:
+    <<: *hardened
+    build: ./docker/caddy
+    # Caddy's binary carries the bind capability; it must stay in the
+    # bounding set or the binary can't start.
+    cap_add: [NET_BIND_SERVICE]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      VIA_HOST: ${VIA_HOST:?set VIA_HOST in .env}
+      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:?set DUCKDNS_TOKEN in .env}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Keeps the certificate across rebuilds, so restarts don't hit Let's
+      # Encrypt rate limits.
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs: [/tmp]
+    networks: [edge]
+    mem_limit: 128m
+    pids_limit: 100
+    depends_on:
+      web:
+        condition: service_healthy
+
+  web:
+    <<: *hardened
+    build:
+      context: ./frontend
+      args:
+        # Empty means same origin: the page talks to /api and /socket.io on
+        # whatever host served it (frontend/src/lib/env.ts).
+        VITE_SOCKET_SERVER_URL: ""
+        VITE_API_BASE_URL: ""
+    volumes:
+      - ./docker/web.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
+    networks: [edge, app]
+    mem_limit: 64m
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    <<: *hardened
+    build: ./backend
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379
+      CLIENT_ORIGIN: https://${VIA_HOST}
+      # Only nginx (the other member of `app`) may report client IPs.
+      TRUSTED_PROXIES: 172.30.1.0/24
+      # Peers share the LAN and connect directly: no TURN relay, no STUN.
+      STUN_URLS: ""
+    tmpfs: [/tmp]
+    networks: [app, data]
+    mem_limit: 256m
+    pids_limit: 100
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    <<: *hardened
+    image: redis:7.4-alpine
+    # The image's redis user; set directly so the entrypoint never needs root.
+    user: "999:1000"
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      # Sessions are short-lived; nothing is written to disk.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - volatile-ttl
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    tmpfs: [/data]
+    networks: [data]
+    mem_limit: 128m
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Pins the DuckDNS A record to the LAN IP (the Plex trick: a public name that
+  # answers with a private address). Re-asserted hourly in case it is changed.
+  ddns:
+    <<: *hardened
+    image: alpine:3.20
+    user: "65534:65534"
+    environment:
+      LAN_IP: ${LAN_IP}
+      DUCKDNS_DOMAIN: ${DUCKDNS_DOMAIN:?set DUCKDNS_DOMAIN in .env}
+      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN}
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          result=$$(wget -qO- "https://www.duckdns.org/update?domains=$${DUCKDNS_DOMAIN}&token=$${DUCKDNS_TOKEN}&ip=$${LAN_IP}")
+          echo "$$(date -u +%FT%TZ) duckdns $${DUCKDNS_DOMAIN} -> $${LAN_IP}: $${result:-no response}"
+          sleep 3600
+        done
+    mem_limit: 16m
+    pids_limit: 10
+
+networks:
+  # Caddy and web. Not internal: Caddy needs the internet for certificates.
+  # The subnet is pinned because web's nginx trusts it for client IPs.
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  # web and api only; the subnet is api's TRUSTED_PROXIES.
+  app:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.1.0/24
+  # api and redis only.
+  data:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.2.0/24
+
+volumes:
+  caddy_data:
+  caddy_config:

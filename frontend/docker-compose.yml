@@ -1,0 +1,31 @@
+name: via-frontend
+
+services:
+  web:
+    image: via-frontend:local
+    build:
+      context: .
+      args:
+        VITE_SOCKET_SERVER_URL: ${VITE_SOCKET_SERVER_URL:-http://localhost:3000}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        VITE_ERROR_REPORTING_URL: ${VITE_ERROR_REPORTING_URL:-}
+    ports:
+      - "${VIA_FRONTEND_PORT:-8080}:8080"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3

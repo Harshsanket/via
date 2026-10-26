@@ -1,0 +1,7 @@
+.git
+backend/.git
+frontend/.git
+docs-internal
+**/node_modules
+**/dist
+.env

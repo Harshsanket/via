@@ -1,0 +1,12 @@
+# TLS front for the via container. Caddy obtains and renews the certificate on
+# its own and redirects http:// to https://.
+{$VIA_HOST} {
+	tls {
+		dns duckdns {env.DUCKDNS_TOKEN}
+		# Check the TXT record against public DNS, not the router's resolver.
+		# (1.1.1.1 is unreachable on some networks, so it isn't listed.)
+		resolvers 9.9.9.9 8.8.8.8
+	}
+
+	reverse_proxy web:8080
+}
