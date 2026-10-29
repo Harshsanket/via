@@ -2,7 +2,7 @@
 
 Private, browser-to-browser file sharing for your home network.
 
-**Version 1.0.0** · [Release notes](CHANGELOG.md) · [GPL-3.0-only](LICENSE)
+**Version 1.0.0** · [Setup guide](SETUP.md) · [Release notes](CHANGELOG.md) · [GPL-3.0-only](LICENSE)
 
 ---
 
@@ -20,7 +20,7 @@ You run Via yourself, in Docker, on one computer that stays on. Everyone at home
 - **Home-only:** nothing is opened on your router, so the site doesn't exist outside your network.
 - **Locked-down containers:** each part runs isolated, read-only, with no extra privileges and, apart from Caddy, as a non-root user.
 
-The project has two parts, each in its own repository folder:
+The project has three parts:
 
 | Folder | What it is |
 |---|---|
@@ -67,109 +67,78 @@ Any current Chrome, Edge, Firefox or Safari can send and receive. Chrome and Edg
 
 ## Getting Started
 
-### 1. Give the host computer a fixed home IP
+The complete guide — every variable, DuckDNS, Caddy, coturn, local development,
+operations and troubleshooting — is in **[SETUP.md](SETUP.md)**. This is the
+short version.
 
-`./scripts/start.sh` detects this computer's LAN address automatically and writes it to `LAN_IP` in `.env` before every start, so the DuckDNS record and the TURN relay always use the current address.
+### Quick start
 
-A **DHCP reservation** (also called a "static lease" or "address reservation") in your router's admin page is still recommended, so the address is stable instead of merely corrected on each start.
+1. **Reserve the host's LAN IP.** Add a **DHCP reservation** in your router so
+   the address stays stable. `./scripts/start.sh` detects and writes the address
+   automatically; `VIA_LAN_IP=…` overrides detection.
+2. **Create a free DuckDNS name.** At <https://www.duckdns.org>, copy the token,
+   add a subdomain, and point its IP at the host's **LAN IP** (not your public
+   IP). Check it with `nslookup yourname-via.duckdns.org 8.8.8.8`.
+3. **Configure.** Copy the deployment template and fill in the six required
+   values:
 
-### 2. Create a free DuckDNS subdomain
-
-1. Go to https://www.duckdns.org and sign in with any of the buttons at the top (GitHub, Google, …). The first sign-in creates the account. It's free and needs no card.
-2. Copy the **token** shown at the top of the page. Keep it private: whoever has it controls your name.
-3. Under **domains**, type a name in `sub domain` (lowercase letters, digits, `-`) and click **add domain**.
-4. DuckDNS fills the new row's `current ip` with your **public** internet IP. **Replace it with the home IP from step 1** and click **update ip**.
-5. Check it. This should print your home IP:
    ```bash
-   nslookup yourname-via.duckdns.org 8.8.8.8
+   cp .env.example .env
+   chmod 600 .env
    ```
 
-### 3. Configure
+   See [Configure the root `.env`](SETUP.md#43-configure-the-root-env) for the
+   full template and secret generation commands.
 
-```bash
-cp .env.example .env
-```
+4. **Start it.** The first build takes a few minutes:
 
-Fill in the deployment secrets in the root `.env`. Every key is described under [Configuration](#configuration).
+   ```bash
+   ./scripts/start.sh
+   docker compose logs -f caddy   # wait for "certificate obtained successfully"
+   ```
 
-For local development, the apps use their own files: copy `backend/.env.example` to `backend/.env` and `frontend/.env.example` to `frontend/.env`.
+5. **Use it.** On any phone or laptop **on the same Wi‑Fi**, open
+   `https://yourname-via.duckdns.org`.
 
-### 4. Start it
+   1. **Send:** pick a file, then press **Copy Link**.
+   2. Share the **whole** link. The part after `#k=` is the security key; a link
+      without it won't open.
+   3. **Receive:** open the link and press **Download**. Both screens show the
+      same security code once the devices have verified each other.
 
-```bash
-./scripts/start.sh
-```
-
-The first start takes a few minutes. Watch Caddy get the certificate:
-
-```bash
-docker compose logs -f caddy
-```
-
-Wait for `certificate obtained successfully`, then press Ctrl+C.
-
-### 5. Use it
-
-On any phone or laptop **on the same Wi‑Fi**, open `https://yourname-via.duckdns.org`.
-
-1. **Send:** pick a file, then press **Copy Link**.
-2. Share the **whole** link with the person receiving. The part after `#k=` is the security key; a link without it won't open.
-3. **Receive:** open the link and press **Download**. Both screens show the same security code once the devices have verified each other.
+For local development, the apps use their own files: copy
+`backend/.env.example` to `backend/.env` and `frontend/.env.example` to
+`frontend/.env`. See [Local development](SETUP.md#49-local-development).
 
 ---
 
 ## Configuration
 
-### Root `.env` (read by `docker-compose.yml`)
+All settings live in one of four places:
 
-Deployment secrets only.
+| Where | Controls | Reference |
+|---|---|---|
+| Root `.env` | Deployment secrets, DuckDNS, LAN IP, session lifetimes | [SETUP.md §4.3](SETUP.md#43-configure-the-root-env) |
+| `docker-compose.yml` | Backend runtime values, networks, volumes, hardening | [SETUP.md §4.6–4.7](SETUP.md#46-the-compose-stack) |
+| `backend/.env` | Backend behavior for local development | [SETUP.md §4.9](SETUP.md#49-local-development) |
+| `frontend/.env` / build args | `VITE_*` values baked into the frontend | [SETUP.md §4.8](SETUP.md#48-frontend-build-configuration) |
+
+The six required root `.env` values are:
 
 | Key | Value |
 |---|---|
 | `DUCKDNS_DOMAIN` | The subdomain only, e.g. `yourname-via` |
 | `VIA_HOST` | The full name, e.g. `yourname-via.duckdns.org` |
 | `DUCKDNS_TOKEN` | Your DuckDNS token |
-| `LAN_IP` | The host's LAN IP. `scripts/start.sh` detects and writes it; override with `VIA_LAN_IP=…` |
-| `REDIS_PASSWORD` | A long random string, e.g. the output of `openssl rand -hex 32` |
-| `TURN_SECRET` | Another long random string, shared by the API and coturn |
+| `LAN_IP` | The host's LAN IP; `scripts/start.sh` writes it |
+| `REDIS_PASSWORD` | `openssl rand -hex 32` |
+| `TURN_SECRET` | A different `openssl rand -hex 32` |
 
-Never commit or share `.env`. It's already listed in `.gitignore` and `.dockerignore`.
+Never commit or share `.env`. It is listed in `.gitignore` and `.dockerignore`.
 
-### `backend/.env` and `frontend/.env` (local development only)
-
-These are read by `npm run dev` in each app and are not used by Docker Compose. Start from the matching `.env.example`. The frontend only sees variables prefixed with `VITE_`.
-
-### Backend environment (set in `docker-compose.yml`)
-
-You don't normally need to change these for a home deployment.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `REDIS_URL` | *(required)* | Redis connection, including its password |
-| `CLIENT_ORIGIN` | *(empty)* | Comma-separated allowed browser origins. If empty, production accepts only the site's own origin |
-| `TRUSTED_PROXIES` | `127.0.0.1/32,::1` | Addresses allowed to report the client IP (`X-Real-IP`): IPv4 CIDRs, single IPs, or `::1` |
-| `MAX_SOCKETS_PER_IP` | `20` | Concurrent connections allowed from one client address |
-| `STUN_URLS` | Google STUN | STUN servers handed to browsers. Compose points this at coturn (`stun:$VIA_HOST:3478`) so LAN discovery stays local |
-| `TURN_URLS`, `TURN_SECRET` | *(unset)* | TURN relay URLs and the shared secret used to sign short-lived credentials. Compose sets both to the coturn service |
-| `PORT` | `3000` | HTTP port |
-| `LOG_LEVEL` | `info` | `debug` adds per-message signaling logs |
-| `SESSION_TTL_SECONDS` | `600` | Initial session lifetime |
-| `REFRESH_SESSION_TTL_SECONDS` | `1800` | Lifetime granted when a peer joins or the session refreshes |
-| `SESSION_MAX_LIFETIME_SECONDS` | `86400` | Absolute cap on a session's age |
-| `SESSION_EXPIRY_WARNING_SECONDS` | `30` | How long before expiry the server warns clients; `0` disables it |
-| `COMPLETED_SESSION_TTL_SECONDS` | `30` | Window both peers get to see a completed transfer before the session closes |
-| `RECOVERY_WINDOW_SECONDS` | `120` | How long a dropped socket may recover before cleanup |
-| `MAX_ACTIVE_SESSIONS_PER_PEER` | `1` | Sessions one connection may own |
-| `MAX_FILE_SIZE_BYTES` | `0` | Largest announced file size; `0` means no server-side cap |
-
-### Frontend build arguments
-
-| Argument | Default | Purpose |
-|---|---|---|
-| `VITE_SOCKET_SERVER_URL` | *(empty, meaning same origin)* | Signaling server URL. Leave empty when nginx serves both |
-| `VITE_API_BASE_URL` | *(derived)* | REST base for `/api/v1` |
-| `VITE_ERROR_REPORTING_URL` | *(unset)* | Optional endpoint for anonymous error reports. If you set it to another host, also allow that host in the CSP in `docker/web.nginx.conf` |
-| `VITE_MAX_RECOVERY_ATTEMPTS` | `2` | How many times a broken transfer is retried |
+The full variable tables — backend runtime, frontend build args, session
+lifetimes, TURN credentials and the legacy single-container variables — are in
+[SETUP.md §4.7–4.10](SETUP.md#47-backend-runtime-configuration).
 
 ---
 
@@ -231,19 +200,16 @@ Anyone outside who looks up the name gets a private IP that leads nowhere.
 ### Running and updating
 
 ```bash
-docker compose up -d --build      # start, or rebuild after changes
-```
-```bash
-docker compose ps                 # every service should be "healthy" or "Up"
-```
-```bash
-docker compose logs -f api        # or caddy, web, redis, ddns
-```
-```bash
-docker compose down               # stop
+./scripts/start.sh                 # detect LAN_IP, build, start
+docker compose ps                  # every service should be "healthy" or "Up"
+docker compose logs -f api         # or caddy, web, redis, coturn, ddns
+docker compose down                # stop; keeps the certificate volumes
 ```
 
-The certificate is kept in a Docker volume, so rebuilding doesn't request a new one. There's no data to back up: sessions are temporary and Redis doesn't write to disk.
+The certificate is kept in a Docker volume, so rebuilding doesn't request a new
+one. There's no data to back up: sessions are temporary and Redis doesn't write
+to disk. For updates, network changes, secret rotation and backups, see the
+[operations runbook](SETUP.md#operations).
 
 ### Services
 
@@ -256,18 +222,29 @@ The certificate is kept in a Docker volume, so rebuilding doesn't request a new 
 | `coturn` | coturn 4.6 | uid 65534, with only `NET_BIND_SERVICE` | Fallback relay for direct-connection failures; cannot reach the Docker networks, loopback or link-local space |
 | `ddns` | Alpine | uid 65534 | Re-pins the DuckDNS record to `LAN_IP` every hour |
 
-Every service has a read-only filesystem, can't gain privileges, and has memory and process limits; all but caddy and coturn drop every Linux capability.
+Every service has a read-only filesystem, can't gain privileges, and has memory
+and process limits; all but caddy and coturn drop every Linux capability. The
+full topology, subnets and volumes are in
+[SETUP.md §4.6](SETUP.md#46-the-compose-stack).
 
 ### Host computer settings
 
-- **Firewall:** allow incoming connections for Docker on ports 80, 443, 3478 (TCP and UDP) and UDP 49300-49340 (the relay range).
+- **Firewall:** allow incoming connections for Docker on ports 80, 443, 3478
+  (TCP and UDP) and UDP 49300-49340 (the relay range).
 - **Sleep:** stop the computer sleeping, or the site disappears.
-- **Auto-start:** set Docker to start at login. The containers restart on their own (`restart: unless-stopped`).
-- **Don't forward any ports** on your router. Via is designed to stay inside your home network.
+- **Auto-start:** set Docker to start at login. The containers restart on their
+  own (`restart: unless-stopped`).
+- **Don't forward any ports** on your router. Via is designed to stay inside
+  your home network.
 
 ### Single-container variant
 
-The root `Dockerfile` (with `docker/entrypoint.sh` and `docker/nginx.conf`) builds everything into one image, with an optional coturn relay (`TURN_ENABLED=true`). `docker-compose.yml` doesn't use it. The split stack above is the supported, hardened deployment.
+The root `Dockerfile` (with `docker/entrypoint.sh` and `docker/nginx.conf`)
+builds everything into one image, with an optional coturn relay
+(`TURN_ENABLED=true`). `docker-compose.yml` doesn't use it, and it does not
+include Caddy. The split stack above is the supported, hardened deployment. See
+[SETUP.md §4.10](SETUP.md#410-single-container-variant) for its variables and
+run command.
 
 ---
 
@@ -277,14 +254,13 @@ The root `Dockerfile` (with `docker/entrypoint.sh` and `docker/nginx.conf`) buil
 |---|---|
 | The name resolves on mobile data but not on Wi‑Fi | Your router has **DNS rebinding protection**, which blocks public names that point at home IPs. Add `duckdns.org` to its exceptions, or use a public DNS server on the device |
 | A device uses a privacy DNS or VPN (Mullvad, NextDNS, AdGuard, Pi-hole…) and the name doesn't resolve | Many of these block answers that point at home IPs. Allow the name in that service, or turn the filter off on your home network |
-| Devices can't reach each other or the host | Turn off **AP / client isolation** on the Wi‑Fi. Guest networks usually have it on. If they still can't, check `docker compose ps coturn` is healthy and that ports 3478 and UDP 49300-49340 reach the host |
-| Metadata arrives but the file never starts | The direct path failed and the relay isn't reachable. Confirm `TURN_SECRET` is set in `.env`, `docker compose logs coturn` shows no auth errors, and the firewall allows the TURN ports |
+| Devices can't reach each other or the host | Turn off **AP / client isolation** on the Wi‑Fi, then check `docker compose ps coturn` and the TURN ports |
 | Caddy's log shows DNS or ACME errors | Check `DUCKDNS_TOKEN` and `DUCKDNS_DOMAIN` in `.env`, then run `docker compose restart caddy` |
-| The site stopped working after the router rebooted | The host got a new IP. Add the DHCP reservation, update `LAN_IP`, then run `docker compose up -d` |
-| "This link is missing its security key" | The link was shortened or cut off. Share the complete link, including the part after `#k=` |
-| "Security check failed" | The two browsers couldn't verify each other: a wrong or edited link, or something in between. Start a new transfer with a fresh link |
-| "too many requests" or HTTP 429 | A client sent far more than normal use. Wait a moment and retry. On Docker Desktop, every device may appear as one address, so the limits are shared per household |
-| Receiving fails on one browser | Chrome and Edge save directly. Browsers without the File System Access API fall back to OPFS, or to memory for files under 512 MB. Use Chrome or Edge for large files |
+| The site stopped working after the router rebooted | The host got a new IP. Run `./scripts/start.sh`; add a DHCP reservation |
+| "too many requests" or HTTP 429 | A client sent far more than normal use. Wait and retry. On Docker Desktop, every device may appear as one address, so limits are shared per household |
+
+The full matrix — ACME, TURN, browser storage, CSP, partial saves and more — is
+in [SETUP.md §Troubleshooting](SETUP.md#troubleshooting).
 
 ---
 
@@ -323,7 +299,7 @@ The integration suites cover sessions, origin checks, session integrity, payload
 | `./scripts/start.sh` | Detect `LAN_IP`, update `.env`, build and start everything |
 | `docker compose up -d --build` | Build and start everything using the current `.env` |
 
-Both repositories run CI on every push and pull request: dependency audit, formatting or lint, unit and integration or end-to-end tests, and a container build. Dependabot keeps npm packages, Docker images and GitHub Actions current.
+The project includes CI workflows and Dependabot configuration for both apps: dependency audit, formatting or lint, unit and integration or end-to-end tests, and a container build.
 
 ---
 
