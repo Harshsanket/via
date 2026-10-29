@@ -58,6 +58,22 @@ test("file names over 255 characters are refused", async () => {
   sender.disconnect();
 });
 
+test("file sizes above the old 50 GB cap are accepted", async () => {
+  const sender = await pool.connect();
+  const sessionId = await createSession(sender);
+
+  const stored = waitFor(sender, "file-metadata");
+  sender.emit("store-file-metadata", {
+    sessionId,
+    fileName: "huge.bin",
+    mimeType: "application/octet-stream",
+    fileSize: 50 * 1024 ** 3 + 1,
+  });
+  assert.equal((await stored)?.metadata?.fileSize, 50 * 1024 ** 3 + 1);
+
+  sender.disconnect();
+});
+
 test("an unusable MIME type is stored as application/octet-stream", async () => {
   const sender = await pool.connect();
   const sessionId = await createSession(sender);

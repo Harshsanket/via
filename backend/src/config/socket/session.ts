@@ -1,9 +1,9 @@
-import { ApiError } from "../../utils/api-error.js";
 import {
   changeTransferStatus,
   completeTransfer,
   createSession,
   getFileMetadata,
+  getReceiverSlot,
   getSessionTTL,
   joinSession,
   storeFileMetadata,
@@ -76,20 +76,63 @@ export const handleSessions = (socket: ViaSocket): void => {
       requireAck: true,
       internalErrorMessage: "failed to join session",
       parse: parseJoinSessionPayload,
-      handle: async ({ sessionId }, ack) => {
+      handle: async ({ sessionId, receiverToken }, ack) => {
         logSocket(
           "info",
           "handleSessions:[join-session]",
           `FROM ${socket.id} : FOR SESSION ${sessionId}`,
         );
 
+        // A refreshed page arrives as a new socket while the old one may still
+        // hold the member slot. Two cases are safe to replace:
+        //   - the old socket is gone, so nobody is behind the slot;
+        //   - the same tab reloaded before the transfer started, proven by the
+        //     token it kept in sessionStorage. A third peer has a different
+        //     token and is still refused as "full".
+        const {
+          peerId: connectedPeer,
+          status,
+          token,
+        } = await getReceiverSlot(sessionId);
+
+        const previousSocketGone =
+          connectedPeer !== null && !socket.nsp.sockets.has(connectedPeer);
+        const sameReceiverReloaded =
+          connectedPeer !== null &&
+          status === SessionStatus.WAITING &&
+          token !== null &&
+          receiverToken !== undefined &&
+          token === receiverToken;
+
+        const replaceablePeerId =
+          connectedPeer && (previousSocketGone || sameReceiverReloaded)
+            ? connectedPeer
+            : undefined;
+
         // joinSession owns existence, limit and idempotency in one atomic script.
         const { ttlSeconds } = await joinSession({
           sessionId,
           peerId: socket.id,
+          replaceablePeerId,
+          receiverToken,
         });
 
         socket.join(sessionId);
+
+        // Evict the old socket before announcing the new peer, so it cannot
+        // receive the new negotiation or emit a late `peer-left` to the sender.
+        if (replaceablePeerId) {
+          const previous = socket.nsp.sockets.get(replaceablePeerId);
+          if (previous && previous.id !== socket.id) {
+            previous.leave(sessionId);
+            previous.emit("session:error", {
+              success: false,
+              message:
+                "This receive session was replaced by a newer connection.",
+            });
+          }
+        }
+
         scheduleSessionExpiry(sessionId, ttlSeconds);
         socket.to(sessionId).emit("peer-joined");
 
@@ -107,6 +150,36 @@ export const handleSessions = (socket: ViaSocket): void => {
       },
     },
   );
+
+  // mark the transfer as started
+  // From this point a rejoin may no longer replace a still-connected receiver:
+  // bytes are in flight and the old page must be given the recovery window.
+  registerHandler(socket, "transfer-start", {
+    context: "handleSessions:[transfer-start]",
+    parse: parseSessionPayload,
+    handle: async ({ sessionId }) => {
+      logSocket(
+        "info",
+        "handleSessions:[transfer-start]",
+        `FROM ${socket.id} : FOR SESSION ${sessionId}`,
+      );
+
+      await assertSessionAccess(socket, sessionId);
+
+      // Receiver only: it is the peer that accepts and starts the download.
+      await changeTransferStatus(
+        sessionId,
+        SessionStatus.TRANSFERRING,
+        socket.id,
+      );
+
+      logSocket(
+        "success",
+        "handleSessions:[transfer-start]",
+        `TRANSFER STARTED FOR :: ${sessionId}`,
+      );
+    },
+  });
 
   // get ttl - retained for compatibility; clients are expected to rely on the
   // `session:expiring` push instead of polling this.
@@ -207,7 +280,20 @@ export const handleSessions = (socket: ViaSocket): void => {
         });
 
         // Receiver only; the sender cannot confirm its own delivery.
-        const fileName = await completeTransfer(sessionId, socket.id);
+        const { fileName, ttlSeconds } = await completeTransfer(
+          sessionId,
+          socket.id,
+        );
+
+        // The session outlives the transfer only briefly. Tell both peers
+        // immediately so their countdowns match the shortened Redis TTL.
+        if (ttlSeconds > 0) {
+          socket.nsp.to(sessionId).emit("session:expiring", {
+            sessionId,
+            secondsRemaining: ttlSeconds,
+          });
+          scheduleSessionExpiry(sessionId, ttlSeconds);
+        }
 
         // Previously `socket.once`, so a socket could only ever report one
         // completed transfer for its whole lifetime.

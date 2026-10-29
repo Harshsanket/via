@@ -1,6 +1,6 @@
 {
   "name": "via",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Signaling server for VIA, a browser-to-browser file sharing app",
   "main": "dist/src/server.js",
   "scripts": {
@@ -16,9 +16,24 @@
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "webrtc",
+    "file-sharing",
+    "socket.io",
+    "signaling-server",
+    "self-hosted"
+  ],
+  "author": "Harsh Sanket",
   "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Harshsanket/via.git",
+    "directory": "backend"
+  },
+  "homepage": "https://github.com/Harshsanket/via#readme",
+  "bugs": {
+    "url": "https://github.com/Harshsanket/via/issues"
+  },
   "type": "module",
   "dependencies": {
     "@types/pino-http": "^5.8.4",

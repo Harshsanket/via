@@ -1,5 +1,6 @@
-import "dotenv/config";
-import { logger } from "../utils/logger.js";
+// The logger module loads .env (unless NODE_ENV=test) before this module reads
+// process.env, so keep it as a side-effect import.
+import "../utils/logger.js";
 
 const requiredVariables = ["REDIS_URL"] as const;
 
@@ -79,11 +80,36 @@ export const env = {
    */
   maxSocketsPerIp: parsePositiveInt(process.env.MAX_SOCKETS_PER_IP, 20),
   /**
+   * How long a dropped Socket.IO connection may come back as the same socket
+   * before its session is cleaned up.
+   */
+  recoveryWindowSeconds: parsePositiveInt(
+    process.env.RECOVERY_WINDOW_SECONDS,
+    2 * 60,
+  ),
+  /**
+   * Largest file size peers may announce, in bytes. 0 means no limit; the
+   * receiving browser decides whether it has room.
+   */
+  maxFileSizeBytes: parseNonNegativeInt(process.env.MAX_FILE_SIZE_BYTES, 0),
+  /**
    * Addresses allowed to report the client IP in X-Real-IP: comma-separated
    * IPv4 CIDRs or single IPs, plus ::1. Loopback by default (nginx in the
    * same container); the split compose stack sets nginx's network.
    */
   trustedProxies: process.env.TRUSTED_PROXIES?.trim() || "127.0.0.1/32,::1",
+  /**
+   * Initial lifetime of a session. Activity may extend it up to
+   * SESSION_MAX_LIFETIME_SECONDS.
+   */
+  sessionTtlSeconds: parsePositiveInt(process.env.SESSION_TTL_SECONDS, 60 * 10),
+  /**
+   * Lifetime granted whenever a peer joins or the session is refreshed.
+   */
+  refreshSessionTtlSeconds: parsePositiveInt(
+    process.env.REFRESH_SESSION_TTL_SECONDS,
+    60 * 30,
+  ),
   /**
    * Absolute age a session may reach, however often it is extended. Without a
    * cap, activity could keep a session (and its Redis keys) alive forever.
@@ -98,6 +124,14 @@ export const env = {
    */
   sessionExpiryWarningSeconds: parseNonNegativeInt(
     process.env.SESSION_EXPIRY_WARNING_SECONDS,
+    30,
+  ),
+  /**
+   * After the receiver confirms the file, the session is kept only long enough
+   * for both sides to see the result before it closes.
+   */
+  completedSessionTtlSeconds: parsePositiveInt(
+    process.env.COMPLETED_SESSION_TTL_SECONDS,
     30,
   ),
   /**

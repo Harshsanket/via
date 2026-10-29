@@ -1,6 +1,6 @@
 # VIA — File Sharing App
 
-**Current Version:** v0.1.0 (alpha)
+**Current Version:** v1.0.0
 
 **Codename:** Hatchling 🐣
 
@@ -18,10 +18,7 @@ session lifetime in Redis, and mints short-lived TURN credentials so transfers
 can get through strict networks. The actual file bytes never touch this server —
 they go peer to peer over WebRTC.
 
-This project is still in early alpha and evolving every day. If you run into a
-bug, have an idea that could make it better, or want to contribute, feel free to
-open an issue or reach out. Every bit of support genuinely helps move the
-project forward.
+This is the first stable release. If you run into a bug, have an idea that could make it better, or want to contribute, feel free to open an issue or reach out. Every bit of support genuinely helps move the project forward.
 
 _Code built and crafted by a human, with love._
 

@@ -8,7 +8,7 @@ import {
   BUFFER_LOW_THRESHOLD,
   CHUNK_SIZE,
   DEFAULT_STUN_SERVERS,
-  MAX_FILE_SIZE,
+  MAX_RECOVERY_ATTEMPTS,
 } from '../../lib/constants'
 import { Crc32 } from '../../lib/crc32'
 import { describeError, formatFileSize, sanitizeFileName } from '../../lib/format'
@@ -46,6 +46,7 @@ import type {
 import {
   createSession,
   getSocket,
+  getTTL,
   offAnswer,
   offConnect,
   offDisconnect,
@@ -88,10 +89,26 @@ const SESSION_ACK_TIMEOUT = 15_000
 const DRAIN_TIMEOUT = 20_000
 const RECOVERY_TIMEOUT = 45_000
 const YIELD_EVERY_CHUNKS = 8
-const MAX_RECOVERY_ATTEMPTS = 2
 
 class TransferAbortedError extends Error {}
 class TransferInterruptedError extends Error {}
+/** A peer connection finished preparing after it had already been superseded. */
+class StaleConnectionError extends Error {}
+
+/**
+ * The session a sender created, kept in module memory so in-app navigation
+ * (home ⇄ send) does not lose it: the server still has the sender in the
+ * session, and asking for another one would be refused. A full reload clears
+ * this, which matches the server dropping the creator's session on disconnect.
+ */
+interface RetainedSendSession {
+  file: File
+  sessionId: string
+  linkKey: string
+  uploadTime: Date
+}
+
+let retainedSendSession: RetainedSendSession | null = null
 
 const waitForBufferSpace = (channel: RTCDataChannel): Promise<void> => {
   if (channel.bufferedAmount <= BUFFER_HIGH_THRESHOLD) return Promise.resolve()
@@ -153,17 +170,24 @@ export function useSendSession() {
   socketRef.current ??= getSocket()
   const socket = socketRef.current
 
-  const [file, setFile] = useState<File | null>(null)
-  const [sessionId, setSessionId] = useState('')
+  const restoredRef = useRef<RetainedSendSession | null>(retainedSendSession)
+  const restored = restoredRef.current
+  const didRestoreRef = useRef(false)
+
+  const [file, setFile] = useState<File | null>(restored?.file ?? null)
+  const [sessionId, setSessionId] = useState(restored?.sessionId ?? '')
   const [copied, setCopied] = useState(false)
   const [transferProgress, setTransferProgress] = useState(0)
-  const [uploadTime, setUploadTime] = useState<Date | null>(null)
+  const [uploadTime, setUploadTime] = useState<Date | null>(
+    restored?.uploadTime ?? null,
+  )
   const [isConnected, setIsConnected] = useState(socket.connected)
-  const [stage, setStage] = useState<TransferStage>('idle')
+  const [stage, setStage] = useState<TransferStage>(
+    restored ? 'session_created' : 'idle',
+  )
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [receiverConfirmed, setReceiverConfirmed] = useState(false)
   const [paused, setPaused] = useState(false)
-  const [turnAvailable, setTurnAvailable] = useState<boolean | null>(null)
   const [transferRate, setTransferRate] = useState<TransferRateSnapshot>({
     bytesPerSecond: null,
     etaSeconds: null,
@@ -173,16 +197,19 @@ export function useSendSession() {
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
-  const fileRef = useRef<File | null>(null)
-  const sessionIdRef = useRef('')
-  const stageRef = useRef<TransferStage>('idle')
+  const fileRef = useRef<File | null>(restored?.file ?? null)
+  const sessionIdRef = useRef(restored?.sessionId ?? '')
+  const stageRef = useRef<TransferStage>(restored ? 'session_created' : 'idle')
   const webrtcInitiatedRef = useRef(false)
+  /** Increments whenever a pending peer setup must be discarded. */
+  const webrtcAttemptRef = useRef(0)
   const transferActiveRef = useRef(false)
   const transferAbortedRef = useRef(false)
   const transferStartedRef = useRef(false)
+  const sendRunRef = useRef(0)
   const finishedRef = useRef(false)
   const pausedRef = useRef(false)
-  const waitingForPeerRef = useRef(false)
+  const waitingForPeerRef = useRef(restored !== null)
   const recoveryAttemptsRef = useRef(0)
   const recoveryTimerRef = useRef<number | null>(null)
   const pauseResolversRef = useRef<Array<() => void>>([])
@@ -197,7 +224,7 @@ export function useSendSession() {
   const checksumRef = useRef<Crc32 | null>(null)
   // Link key (shared only through the link's #fragment) and the result of
   // the peer check it enables; see lib/peer-auth.ts.
-  const linkKeyRef = useRef<string | null>(null)
+  const linkKeyRef = useRef<string | null>(restored?.linkKey ?? null)
   const peerVerifiedRef = useRef(false)
   const authTimerRef = useRef<number | null>(null)
   const pendingFramesRef = useRef<string[]>([])
@@ -250,6 +277,7 @@ export function useSendSession() {
 
     iceBufferRef.current.reset()
     webrtcInitiatedRef.current = false
+    webrtcAttemptRef.current += 1
   }, [])
 
   const failTransfer = useCallback(
@@ -280,6 +308,7 @@ export function useSendSession() {
 
   const handleSessionExpired = useCallback(() => {
     if (finishedRef.current) return
+    retainedSendSession = null
     failTransfer('This session expired. Start a new session to continue.')
   }, [failTransfer])
 
@@ -315,8 +344,14 @@ export function useSendSession() {
     transferAbortedRef.current = false
     setStage('transferring')
 
+    // A recovery may start a new loop while this one is still waiting on a
+    // slice or the buffer. Only the newest run may move the offset or finish.
+    const run = ++sendRunRef.current
+    const isStale = () => sendRunRef.current !== run
+
     try {
       while (offsetRef.current < currentFile.size) {
+        if (isStale()) return
         if (transferAbortedRef.current) throw new TransferAbortedError()
 
         if (isChannelStale(dataChannelRef, channel)) {
@@ -327,18 +362,22 @@ export function useSendSession() {
           await new Promise<void>((resolve) => {
             pauseResolversRef.current.push(resolve)
           })
+          if (isStale()) return
           if (transferAbortedRef.current) throw new TransferAbortedError()
           if (isChannelStale(dataChannelRef, channel)) throw new TransferInterruptedError()
         }
 
         await waitForBufferSpace(channel)
 
+        if (isStale()) return
         if (transferAbortedRef.current) throw new TransferAbortedError()
         if (isChannelStale(dataChannelRef, channel)) throw new TransferInterruptedError()
 
         const start = offsetRef.current
         const end = Math.min(start + CHUNK_SIZE, currentFile.size)
         const buffer = await currentFile.slice(start, end).arrayBuffer()
+
+        if (isStale()) return
 
         if (!checksumRef.current) checksumRef.current = new Crc32()
         checksumRef.current.update(buffer)
@@ -363,6 +402,8 @@ export function useSendSession() {
         }
       }
 
+      if (isStale()) return
+
       const checksum = checksumRef.current ?? new Crc32()
       channel.send(
         encodeControlFrame({
@@ -383,6 +424,7 @@ export function useSendSession() {
         resumed: initialOffsetRef.current > 0,
       })
     } catch (error) {
+      if (isStale()) return
       if (error instanceof TransferAbortedError || transferAbortedRef.current) {
         return
       }
@@ -394,7 +436,7 @@ export function useSendSession() {
 
       failTransfer(`Transfer failed: ${describeError(error)}`)
     } finally {
-      transferActiveRef.current = false
+      if (!isStale()) transferActiveRef.current = false
     }
   }, [addLog, failTransfer])
 
@@ -507,15 +549,18 @@ export function useSendSession() {
   }, [handleChannelControl])
 
   const createSenderPeer = useCallback(
-    async (sid: string): Promise<RTCPeerConnection> => {
+    async (sid: string, attempt: number): Promise<RTCPeerConnection> => {
       const iceConfig =
         (await iceConfigPromiseRef.current) ?? {
           servers: DEFAULT_STUN_SERVERS,
-          turnAvailable: false,
         }
 
-      if (sessionIdRef.current !== sid) {
-        throw new Error('Session changed while creating the peer connection')
+      if (
+        sessionIdRef.current !== sid ||
+        webrtcAttemptRef.current !== attempt ||
+        !webrtcInitiatedRef.current
+      ) {
+        throw new StaleConnectionError()
       }
 
       const pc = new RTCPeerConnection(
@@ -534,7 +579,7 @@ export function useSendSession() {
             beginRecoveryRef.current('The peer connection failed')
           } else if (!finishedRef.current) {
             failTransfer(
-              'The peer-to-peer connection failed. A TURN relay may be required on this network.',
+              'Could not connect directly to the other device. Make sure both devices are on the same Wi-Fi (not a guest network), with client/AP isolation off and any VPN disabled.',
             )
           }
         } else if (state === 'disconnected') {
@@ -568,6 +613,9 @@ export function useSendSession() {
   const startPeerAuth = useCallback(
     async (channel: RTCDataChannel) => {
       peerVerifiedRef.current = false
+      // The old code belongs to the previous channel; a new handshake has not
+      // proven anything yet, so never show it as "Verified" meanwhile.
+      setVerificationCode(null)
       pendingFramesRef.current = []
       clearAuthTimer()
 
@@ -700,6 +748,7 @@ export function useSendSession() {
       if (!sid) return
 
       webrtcInitiatedRef.current = true
+      const attempt = ++webrtcAttemptRef.current
       setStage(resume ? 'reconnecting' : 'webrtc_negotiating')
       addLog(
         resume ? 'Re-establishing the encrypted channel…' : 'Creating an encrypted connection…',
@@ -707,8 +756,14 @@ export function useSendSession() {
       )
 
       try {
-        const pc = await createSenderPeer(sid)
-        if (!webrtcInitiatedRef.current || sessionIdRef.current !== sid) return
+        const pc = await createSenderPeer(sid, attempt)
+        if (
+          !webrtcInitiatedRef.current ||
+          webrtcAttemptRef.current !== attempt ||
+          sessionIdRef.current !== sid
+        ) {
+          return
+        }
 
         const channel = pc.createDataChannel('fileTransfer', { ordered: true })
         attachSenderChannel(channel, resume)
@@ -721,6 +776,14 @@ export function useSendSession() {
           'connecting',
         )
       } catch (error) {
+        // A reset or a newer attempt already owns the connection; its state
+        // (including webrtcInitiatedRef) must not be disturbed by this one.
+        if (
+          error instanceof StaleConnectionError ||
+          webrtcAttemptRef.current !== attempt
+        ) {
+          return
+        }
         webrtcInitiatedRef.current = false
         failTransfer(`WebRTC setup failed: ${describeError(error)}`)
       }
@@ -772,6 +835,18 @@ export function useSendSession() {
     renegotiateRef.current = renegotiate
   }, [renegotiate])
 
+  useEffect(() => {
+    const snapshot = restoredRef.current
+    if (!snapshot || didRestoreRef.current) return
+    didRestoreRef.current = true
+
+    addLog('Restored your open session', 'info')
+    iceConfigPromiseRef.current = fetchIceServers(snapshot.sessionId)
+    // The receiver may still be waiting in the session; offer a fresh
+    // connection. If it is not there yet, peer-joined starts a new one.
+    void initiateConnectionRef.current(false)
+  }, [addLog])
+
   const beginRecovery = useCallback(
     (reason: string) => {
       if (
@@ -783,6 +858,11 @@ export function useSendSession() {
       ) {
         return
       }
+
+      // Stop the current send loop before the channel is replaced: it would
+      // otherwise wake up on the stale channel and either throw or emit a
+      // completion frame from the old stream.
+      sendRunRef.current += 1
 
       recoveryAttemptsRef.current += 1
       if (recoveryAttemptsRef.current > MAX_RECOVERY_ATTEMPTS) {
@@ -863,6 +943,7 @@ export function useSendSession() {
       addLog(`Session error: ${data.message}`, 'error')
 
       if (isTerminalSessionError(data.message) && !transferActiveRef.current) {
+        retainedSendSession = null
         failTransfer(data.message, false)
       }
     }
@@ -893,6 +974,10 @@ export function useSendSession() {
       const wasWaiting = waitingForPeerRef.current
       waitingForPeerRef.current = false
 
+      // Joining refreshes the session TTL on the server; re-seed the local
+      // countdown so the sender does not display the original, shorter one.
+      if (sessionIdRef.current) getTTL(socket, sessionIdRef.current)
+
       if (transferStartedRef.current && !finishedRef.current) {
         addLog('Receiver rejoined — resuming the transfer…', 'success')
         if (wasWaiting || !dataChannelRef.current) {
@@ -903,6 +988,13 @@ export function useSendSession() {
       }
 
       if (finishedRef.current) return
+
+      // A restored session may have sent an offer before the receiver came
+      // back; start over so the receiver gets a fresh one.
+      if (wasWaiting || webrtcInitiatedRef.current) {
+        resetPeerConnection()
+        webrtcInitiatedRef.current = false
+      }
 
       addLog('Receiver joined — starting the handshake…', 'connecting')
       setSessionError(null)
@@ -928,6 +1020,7 @@ export function useSendSession() {
         addLog('Receiver left — the link is ready to share again', 'info')
         setStage('session_created')
         setTransferProgress(0)
+        setVerificationCode(null)
         resetPeerConnection()
       }
     }
@@ -1026,6 +1119,14 @@ export function useSendSession() {
         // A fresh key per session; it only ever travels in the link fragment.
         const linkKey = generateLinkKey()
         linkKeyRef.current = linkKey
+        const selectedAt = new Date()
+        retainedSendSession = {
+          file: selectedFile,
+          sessionId: id,
+          linkKey,
+          uploadTime: selectedAt,
+        }
+        setUploadTime(selectedAt)
         peerVerifiedRef.current = false
         setVerificationCode(null)
         setStage('session_created')
@@ -1039,10 +1140,7 @@ export function useSendSession() {
         setSessionError(null)
         addLog('Session created — share the link with the receiver', 'success')
 
-        iceConfigPromiseRef.current = fetchIceServers(id).then((config) => {
-          setTurnAvailable(config.turnAvailable)
-          return config
-        })
+        iceConfigPromiseRef.current = fetchIceServers(id)
 
         // The server only ever stores the name and type encrypted.
         void encryptMetadata(linkKey, {
@@ -1072,12 +1170,6 @@ export function useSendSession() {
       if (selectedFile.size <= 0) {
         addLog('That file is empty', 'error')
         setSessionError('Empty files cannot be transferred.')
-        return
-      }
-
-      if (selectedFile.size > MAX_FILE_SIZE) {
-        addLog('File exceeds the 50 GB limit', 'error')
-        setSessionError('Files must be smaller than 50 GB.')
         return
       }
 
@@ -1182,64 +1274,17 @@ export function useSendSession() {
     addLog('Transfer paused', 'info')
   }, [addLog, releasePauseWaiters])
 
-  const handleCancelTransfer = useCallback(() => {
-    if (sessionIdRef.current && socket.connected) {
-      sendTransferError(socket, sessionIdRef.current, 'cancelled by sender')
-    }
-    const channel = dataChannelRef.current
-    if (channel?.readyState === 'open') {
-      try {
-        channel.send(encodeControlFrame({ type: 'cancel', message: 'cancelled by sender' }))
-      } catch {
-        // The channel may already be closing.
-      }
-    }
-
-    transferAbortedRef.current = true
-    transferActiveRef.current = false
-    transferStartedRef.current = false
-    pausedRef.current = false
-    waitingForPeerRef.current = false
-    setPaused(false)
-    releasePauseWaiters()
-    clearRecoveryTimer()
-    resetPeerConnection()
-    setStage('error')
-    setSessionError('Transfer cancelled.')
-    setTransferRate({ bytesPerSecond: null, etaSeconds: null })
-    addLog('Transfer cancelled', 'info')
-    reportEvent('transfer.cancelled', { surface: 'send' })
-  }, [
-    addLog,
-    clearRecoveryTimer,
-    releasePauseWaiters,
-    resetPeerConnection,
-    socket,
-  ])
-
-  const handleCopyUrl = useCallback(async () => {
-    if (!sessionIdRef.current) return
-
-    try {
-      await navigator.clipboard.writeText(
-        buildReceiveUrl(sessionIdRef.current, linkKeyRef.current),
-      )
-      setCopied(true)
-      addLog('Receive link copied to clipboard', 'success')
-      window.setTimeout(() => setCopied(false), 2_000)
-    } catch {
-      addLog('Could not copy the link', 'error')
-    }
-  }, [addLog])
-
-  const handleStartOver = useCallback(() => {
+  const resetToIdle = useCallback(() => {
+    retainedSendSession = null
     transferAbortedRef.current = true
     transferActiveRef.current = false
     transferStartedRef.current = false
     finishedRef.current = false
     pausedRef.current = false
     waitingForPeerRef.current = false
+    peerVerifiedRef.current = false
     releasePauseWaiters()
+    clearAuthTimer()
     clearRecoveryTimer()
     resetPeerConnection()
 
@@ -1263,14 +1308,61 @@ export function useSendSession() {
     setCopied(false)
     setReceiverConfirmed(false)
     setPaused(false)
-    setTurnAvailable(null)
+    setVerificationCode(null)
     setTransferRate({ bytesPerSecond: null, etaSeconds: null })
 
-    addLog('Ready for a new transfer', 'info')
-
+    // Leaving the socket releases the creator's session, so the next file can
+    // create a fresh one instead of being refused as "already in session".
     socket.disconnect()
     socket.connect()
-  }, [addLog, clearRecoveryTimer, releasePauseWaiters, resetPeerConnection, socket])
+  }, [
+    clearAuthTimer,
+    clearRecoveryTimer,
+    releasePauseWaiters,
+    resetPeerConnection,
+    socket,
+  ])
+
+  const handleCancelTransfer = useCallback(() => {
+    if (sessionIdRef.current && socket.connected) {
+      sendTransferError(socket, sessionIdRef.current, 'cancelled by sender')
+    }
+    const channel = dataChannelRef.current
+    if (channel?.readyState === 'open') {
+      try {
+        channel.send(encodeControlFrame({ type: 'cancel', message: 'cancelled by sender' }))
+      } catch {
+        // The channel may already be closing.
+      }
+    }
+
+    addLog('Transfer cancelled', 'info')
+    reportEvent('transfer.cancelled', { surface: 'send' })
+
+    // Cancelling is a deliberate exit: return to the file picker, not the
+    // error card.
+    resetToIdle()
+  }, [addLog, resetToIdle, socket])
+
+  const handleCopyUrl = useCallback(async () => {
+    if (!sessionIdRef.current) return
+
+    try {
+      await navigator.clipboard.writeText(
+        buildReceiveUrl(sessionIdRef.current, linkKeyRef.current),
+      )
+      setCopied(true)
+      addLog('Receive link copied to clipboard', 'success')
+      window.setTimeout(() => setCopied(false), 2_000)
+    } catch {
+      addLog('Could not copy the link', 'error')
+    }
+  }, [addLog])
+
+  const handleStartOver = useCallback(() => {
+    resetToIdle()
+    addLog('Ready for a new transfer', 'info')
+  }, [addLog, resetToIdle])
 
   useEffect(() => {
     return () => {
@@ -1300,7 +1392,6 @@ export function useSendSession() {
   const isDone = stage === 'done'
   const isError = stage === 'error'
   const isCreatingSession = stage === 'creating_session'
-  const canSend = stage === 'ready'
   const isPeerConnected =
     stage === 'ready' || stage === 'transferring' || stage === 'done'
 
@@ -1316,7 +1407,6 @@ export function useSendSession() {
     sessionError,
     receiverConfirmed,
     paused,
-    turnAvailable,
     transferRate,
     logs,
     ttl,
@@ -1325,7 +1415,6 @@ export function useSendSession() {
     isDone,
     isError,
     isCreatingSession,
-    canSend,
     isPeerConnected,
     handleFileSelect,
     handleSendFile,

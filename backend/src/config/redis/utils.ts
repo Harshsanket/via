@@ -3,22 +3,10 @@ import { logger } from "../../utils/logger.js";
 import { NO_SESSION, peerStorageKey } from "./constants.js";
 import { Level } from "./types.js";
 
-export const isValidString = (value: unknown): value is string => {
-  return typeof value === "string" && value.trim().length > 0;
-};
-
-export const areValidStrings = (...values: unknown[]): boolean => {
+const areValidStrings = (...values: unknown[]): boolean => {
   return values.every(
     (value) => typeof value === "string" && value.trim().length > 0,
   );
-};
-
-export const logRedisError = (
-  context: string,
-  message: string,
-  error?: unknown,
-): void => {
-  logger.error(`[REDIS] :: [ERROR] :: [${context}] :: ${message} :: ${error}`);
 };
 
 export const redisKeyExists = async (key: string): Promise<boolean> => {

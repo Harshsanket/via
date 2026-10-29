@@ -1,11 +1,15 @@
 const MB = 1024 * 1024
-const GB = 1024 * MB
 
-/** Mirrors the backend's MAX_FILE_SIZE. */
-export const MAX_FILE_SIZE = 50 * GB
+const parsePositiveInt = (value: unknown, fallback: number): number => {
+  const parsed = Number.parseInt(typeof value === 'string' ? value : '', 10)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
 
-/** Safe ceiling when the browser cannot stream to disk (no OPFS). */
-export const MEMORY_FALLBACK_MAX_FILE_SIZE = 512 * MB
+/** How many times a broken transfer is retried before giving up. */
+export const MAX_RECOVERY_ATTEMPTS = parsePositiveInt(
+  import.meta.env.VITE_MAX_RECOVERY_ATTEMPTS,
+  2,
+)
 
 export const CHUNK_SIZE = 64 * 1024
 export const BUFFER_HIGH_THRESHOLD = 4 * MB

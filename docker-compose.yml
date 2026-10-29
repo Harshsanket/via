@@ -14,6 +14,7 @@
 #   LAN ──443──▶ caddy ──edge──▶ web ──app──▶ api ──data──▶ redis
 #                 (TLS)        (nginx +     (signaling)    (sessions)
 #                               frontend)
+#   LAN ──3478─▶ coturn ◀──────── edge (fallback relay only)
 #
 # `app` and `data` are internal networks with no route out, so api and redis
 # can't reach the internet, and redis is reachable from api alone.
@@ -88,8 +89,18 @@ services:
       CLIENT_ORIGIN: https://${VIA_HOST}
       # Only nginx (the other member of `app`) may report client IPs.
       TRUSTED_PROXIES: 172.30.1.0/24
-      # Peers share the LAN and connect directly: no TURN relay, no STUN.
-      STUN_URLS: ""
+      # Session lifetimes come from .env so they can be tuned without a rebuild.
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-600}
+      REFRESH_SESSION_TTL_SECONDS: ${REFRESH_SESSION_TTL_SECONDS:-1800}
+      SESSION_MAX_LIFETIME_SECONDS: ${SESSION_MAX_LIFETIME_SECONDS:-86400}
+      SESSION_EXPIRY_WARNING_SECONDS: ${SESSION_EXPIRY_WARNING_SECONDS:-30}
+      COMPLETED_SESSION_TTL_SECONDS: ${COMPLETED_SESSION_TTL_SECONDS:-30}
+      # Direct host candidates are tried first; the LAN relay is the fallback
+      # when a phone and computer cannot reach each other (AP isolation,
+      # blocked mDNS, VPN). Credentials are minted per session.
+      STUN_URLS: "stun:${VIA_HOST:?set VIA_HOST in .env}:3478"
+      TURN_URLS: "turn:${VIA_HOST}:3478?transport=udp,turn:${VIA_HOST}:3478?transport=tcp"
+      TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET in .env}
     tmpfs: [/tmp]
     networks: [app, data]
     mem_limit: 256m
@@ -134,6 +145,62 @@ services:
       timeout: 3s
       retries: 5
 
+  # Fallback relay for the rare network where two LAN devices cannot reach
+  # each other directly. It is never the first choice: browsers still prefer
+  # host candidates. Files stay DTLS end-to-end encrypted; only ciphertext is
+  # relayed, and only after a live session vends short-lived credentials.
+  #
+  # The denied-peer rules keep the relay out of this host's Docker networks and
+  # loopback space, so it cannot be used to reach containers or the host.
+  coturn:
+    <<: *hardened
+    image: coturn/coturn:4.6.2-alpine
+    # The image's turnserver carries the bind capability as a file capability;
+    # without it in the bounding set, exec fails even though TURN uses 3478.
+    cap_add: [NET_BIND_SERVICE]
+    command:
+      - --fingerprint
+      - --lt-cred-mech
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET:?set TURN_SECRET in .env}
+      - --realm=via
+      - --listening-port=3478
+      - --min-port=49300
+      - --max-port=49340
+      # Advertise the host's LAN address, since the relay ports are published.
+      - --external-ip=${LAN_IP:?set LAN_IP in .env (or run ./scripts/start.sh)}
+      # Plain TURN only: the site insists on HTTPS but ICE does not need TLS.
+      - --no-tls
+      - --no-dtls
+      - --no-tcp-relay
+      - --no-multicast-peers
+      - --no-cli
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.65.0-192.168.65.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --log-file=stdout
+      - --simple-log
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      # A bounded relay range: enough for a handful of transfers, small enough
+      # to publish, unlike the default 49152-65535.
+      - "49300-49340:49300-49340/udp"
+    tmpfs: [/tmp, /var/lib/coturn, /var/run]
+    networks: [edge]
+    mem_limit: 128m
+    pids_limit: 100
+    healthcheck:
+      test: ["CMD", "turnutils_stunclient", "-p", "3478", "127.0.0.1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
   # Pins the DuckDNS A record to the LAN IP (the Plex trick: a public name that
   # answers with a private address). Re-asserted hourly in case it is changed.
   ddns:
@@ -141,7 +208,7 @@ services:
     image: alpine:3.20
     user: "65534:65534"
     environment:
-      LAN_IP: ${LAN_IP}
+      LAN_IP: ${LAN_IP:?set LAN_IP in .env (or run ./scripts/start.sh)}
       DUCKDNS_DOMAIN: ${DUCKDNS_DOMAIN:?set DUCKDNS_DOMAIN in .env}
       DUCKDNS_TOKEN: ${DUCKDNS_TOKEN}
     command:

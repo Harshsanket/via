@@ -1,9 +1,3 @@
-export const areValidStrings = (...values: unknown[]): boolean => {
-  return values.every(
-    (value) => typeof value === "string" && value.trim().length > 0,
-  );
-};
-
 /**
  * Session ids are always `crypto.randomUUID()` values minted by the server,
  * so anything else is refused before it reaches Redis or the logs.

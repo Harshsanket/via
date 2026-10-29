@@ -4,17 +4,17 @@ import type { Socket } from 'socket.io-client'
 
 import { useLogger } from '../../hooks/useLogger'
 import { useSessionTtl } from '../../hooks/useSessionTtl'
-import {
-  DEFAULT_STUN_SERVERS,
-  MAX_FILE_SIZE,
-  MEMORY_FALLBACK_MAX_FILE_SIZE,
-} from '../../lib/constants'
+import { DEFAULT_STUN_SERVERS, MAX_RECOVERY_ATTEMPTS } from '../../lib/constants'
 import { Crc32 } from '../../lib/crc32'
 import {
   IncomingFileSink,
-  isOpfsSupported,
-  sweepStaleTransfers,
-  type SinkMode,
+  MEMORY_FALLBACK_MAX_FILE_SIZE,
+  isOpfsAvailable,
+  sweepStaleTempFiles,
+} from '../../lib/file-sink'
+import type {
+  IncomingFileSinkOptions,
+  SinkMode,
 } from '../../lib/file-sink'
 import {
   describeError,
@@ -22,8 +22,10 @@ import {
   sanitizeFileName,
   sanitizeMimeType,
 } from '../../lib/format'
+import { getReceiverToken } from '../../lib/receiver-token'
 import { fetchIceServers, type IceConfig } from '../../lib/ice'
 import { reportEvent } from '../../lib/observability'
+import { hasEnoughStorage } from '../../lib/storage'
 import {
   computeAuthTag,
   computeVerificationCode,
@@ -81,6 +83,7 @@ import {
   sendIceCandidate,
   sendTransferComplete,
   sendTransferError,
+  sendTransferStart,
 } from '../../socket/Index'
 
 export type ReceiveStage =
@@ -95,8 +98,6 @@ export type ReceiveStage =
   | 'done'
   | 'error'
 
-export type DownloadMode = 'direct' | 'fallback'
-
 type SaveFilePicker = (options?: {
   suggestedName?: string
 }) => Promise<FileSystemFileHandle>
@@ -107,15 +108,6 @@ const getSaveFilePicker = (): SaveFilePicker | null => {
   return typeof picker === 'function' ? picker.bind(window) : null
 }
 
-const triggerDownload = (url: string, name: string): void => {
-  const link = document.createElement('a')
-  link.href = url
-  link.download = name
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-}
-
 export interface FileInfo {
   fileName: string
   mimeType: string
@@ -124,18 +116,17 @@ export interface FileInfo {
 
 export interface ReceivedFile {
   name: string
-  url: string | null
   mode: SinkMode
+  downloadUrl?: string
 }
 
 const JOIN_ACK_TIMEOUT = 15_000
 const RECOVERY_TIMEOUT = 45_000
 const RETRY_TIMEOUT = 10_000
 const REQUEST_TIMEOUT = 15_000
-const MAX_RECOVERY_ATTEMPTS = 2
 
 const isTerminalSessionError = (message: string): boolean =>
-  /expired|invalid|full|unauthorized|not in session/i.test(message)
+  /expired|invalid|full|unauthorized|not in session|replaced/i.test(message)
 
 /** How long the sender has to prove it holds the link key. */
 const AUTH_TIMEOUT_MS = 15_000
@@ -159,13 +150,10 @@ export function useReceiveSession(urlSessionId: string | undefined) {
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null)
   const [transferProgress, setTransferProgress] = useState(0)
   const [receivedFile, setReceivedFile] = useState<ReceivedFile | null>(null)
-  const [saved, setSaved] = useState(false)
   const [copied, setCopied] = useState(false)
   const [isConnected, setIsConnected] = useState(socket.connected)
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [retryable, setRetryable] = useState(false)
-  const [downloadMode, setDownloadMode] = useState<DownloadMode | null>(null)
-  const [turnAvailable, setTurnAvailable] = useState<boolean | null>(null)
   const [transferRate, setTransferRate] = useState<TransferRateSnapshot>({
     bytesPerSecond: null,
     etaSeconds: null,
@@ -180,7 +168,6 @@ export function useReceiveSession(urlSessionId: string | undefined) {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
   const sinkRef = useRef<IncomingFileSink | null>(null)
-  const receivedFileCleanupRef = useRef<(() => void) | null>(null)
   const fileInfoRef = useRef<FileInfo | null>(null)
   const dataMetaRef = useRef<FileInfo | null>(null)
   const receivedBytesRef = useRef(0)
@@ -195,9 +182,8 @@ export function useReceiveSession(urlSessionId: string | undefined) {
   const recoveryTimerRef = useRef<number | null>(null)
   const retryTimerRef = useRef<number | null>(null)
   const requestTimerRef = useRef<number | null>(null)
-  const destinationRef = useRef<FileSystemFileHandle | null>(null)
-  const downloadModeRef = useRef<DownloadMode | null>(null)
-  const autoDownloadRef = useRef(false)
+  const saveTargetRef = useRef<IncomingFileSinkOptions | null>(null)
+  const receivedCleanupRef = useRef<(() => void) | null>(null)
   const lastProgressRef = useRef(-1)
   const lastRateUiAtRef = useRef(0)
   const initialOffsetRef = useRef(0)
@@ -238,7 +224,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
 
   // Clear partial downloads a crashed or closed tab left behind.
   useEffect(() => {
-    void sweepStaleTransfers().catch(() => undefined)
+    void sweepStaleTempFiles().catch(() => undefined)
   }, [])
 
   const clearRecoveryTimer = useCallback(() => {
@@ -262,15 +248,15 @@ export function useReceiveSession(urlSessionId: string | undefined) {
     }
   }, [])
 
-  const releaseReceivedFile = useCallback(() => {
-    receivedFileCleanupRef.current?.()
-    receivedFileCleanupRef.current = null
-  }, [])
-
   const abortSink = useCallback(() => {
     const sink = sinkRef.current
     sinkRef.current = null
     if (sink) void sink.abort()
+  }, [])
+
+  const releaseReceivedFile = useCallback(() => {
+    receivedCleanupRef.current?.()
+    receivedCleanupRef.current = null
   }, [])
 
   const teardownNegotiation = useCallback(() => {
@@ -489,10 +475,15 @@ export function useReceiveSession(urlSessionId: string | undefined) {
       }
 
       channel.onmessage = (messageEvent) => {
+        // A replaced channel can still deliver frames that were in flight when
+        // it closed. They belong to the old stream and would corrupt the
+        // resumed offset, so only the active channel is read.
+        if (dataChannelRef.current !== channel) return
         handleIncomingDataRef.current(messageEvent.data)
       }
 
       channel.onerror = () => {
+        if (dataChannelRef.current !== channel) return
         failTransfer('The data channel reported an error.')
       }
 
@@ -515,11 +506,17 @@ export function useReceiveSession(urlSessionId: string | undefined) {
       const iceConfig =
         (await iceConfigPromiseRef.current) ?? {
           servers: DEFAULT_STUN_SERVERS,
-          turnAvailable: false,
         }
 
       if (sessionIdRef.current !== sid) {
         throw new Error('Session changed while creating the peer connection')
+      }
+
+      // Two callers can race here (an offer arriving while the join handler is
+      // preparing the peer). Reuse the winner instead of replacing it and
+      // leaking the first connection.
+      if (peerConnectionRef.current && webrtcReadyRef.current) {
+        return peerConnectionRef.current
       }
 
       const pc = new RTCPeerConnection(
@@ -539,7 +536,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
             beginRecoveryRef.current('The peer connection failed')
           } else if (!finishedRef.current) {
             failTransfer(
-              'The peer-to-peer connection failed. A TURN relay may be required on this network.',
+              'Could not connect directly to the other device. Make sure both devices are on the same Wi-Fi (not a guest network), with client/AP isolation off and any VPN disabled.',
             )
           }
         } else if (state === 'disconnected') {
@@ -646,6 +643,8 @@ export function useReceiveSession(urlSessionId: string | undefined) {
       // Already verified on this channel; a repeat changes nothing.
       if (frame.type === 'auth') return
 
+      if (frame.type === 'offer-transfer') return
+
       if (frame.type === 'metadata') {
         const info: FileInfo = {
           fileName: sanitizeFileName(frame.fileName),
@@ -665,7 +664,9 @@ export function useReceiveSession(urlSessionId: string | undefined) {
           return
         }
 
-        if (!isOpfsSupported() && info.fileSize > MEMORY_FALLBACK_MAX_FILE_SIZE) {
+        // Without OPFS the whole file is buffered in memory, so refuse an
+        // unbounded download before the first chunk instead of crashing the tab.
+        if (!isOpfsAvailable() && info.fileSize > MEMORY_FALLBACK_MAX_FILE_SIZE) {
           failTransfer(
             'This browser can only receive files up to 512 MB. Use Chrome or Edge for larger files.',
           )
@@ -783,13 +784,12 @@ export function useReceiveSession(urlSessionId: string | undefined) {
 
       let activeSink = sinkRef.current
       if (!activeSink) {
-        activeSink = new IncomingFileSink(
-          meta.fileName,
-          meta.mimeType,
-          meta.fileSize,
-          MEMORY_FALLBACK_MAX_FILE_SIZE,
-          { destination: destinationRef.current ?? undefined },
-        )
+        const target = saveTargetRef.current
+        if (!target) {
+          failTransfer('Choose how to save the file before receiving it.')
+          return
+        }
+        activeSink = new IncomingFileSink(meta.fileName, meta.mimeType, meta.fileSize, target)
         sinkRef.current = activeSink
       }
 
@@ -843,6 +843,9 @@ export function useReceiveSession(urlSessionId: string | undefined) {
   const startPeerAuth = useCallback(
     async (channel: RTCDataChannel) => {
       peerVerifiedRef.current = false
+      // The old code belongs to the previous channel; a new handshake has not
+      // proven anything yet, so never show it as "Verified" meanwhile.
+      setVerificationCode(null)
       pendingFramesRef.current = []
       clearAuthTimer()
 
@@ -956,14 +959,16 @@ export function useReceiveSession(urlSessionId: string | undefined) {
 
       try {
         const finished = await sink.finish()
-        receivedFileCleanupRef.current = finished.cleanup
+        sinkRef.current = null
+        releaseReceivedFile()
+        receivedCleanupRef.current = finished.cleanup
         clearRetryTimer()
         clearRecoveryTimer()
         clearRequestTimer()
         setReceivedFile({
           name: finished.name,
-          url: finished.url,
           mode: finished.mode,
+          downloadUrl: finished.downloadUrl,
         })
         setTransferProgress(100)
         setStage('done')
@@ -973,7 +978,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
         addLog(
           finished.mode === 'direct'
             ? `Saved directly to disk: ${finished.name}`
-            : `File verified and ready to save: ${finished.name}`,
+            : 'File received — ready to save',
           'success',
         )
         reportEvent('transfer.received', {
@@ -982,19 +987,6 @@ export function useReceiveSession(urlSessionId: string | undefined) {
           resumed: initialOffsetRef.current > 0,
           saveMode: finished.mode,
         })
-
-        if (
-          autoDownloadRef.current &&
-          downloadModeRef.current === 'fallback' &&
-          finished.url
-        ) {
-          setSaved(true)
-          window.setTimeout(() => {
-            if (finished.url) triggerDownload(finished.url, finished.name)
-          }, 0)
-        } else if (finished.mode === 'direct') {
-          setSaved(true)
-        }
 
         if (sessionIdRef.current) {
           sendTransferComplete(socket, sessionIdRef.current, finished.name)
@@ -1010,6 +1002,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
       clearRetryTimer,
       failTransfer,
       markRecoverableFailure,
+      releaseReceivedFile,
       socket,
     ],
   )
@@ -1073,20 +1066,10 @@ export function useReceiveSession(urlSessionId: string | undefined) {
         fileSize: metadata.fileSize,
       }
 
-      if (!Number.isFinite(info.fileSize) || info.fileSize <= 0) return
-      if (info.fileSize > MAX_FILE_SIZE) {
-        setSessionError('The sender selected a file larger than 50 GB.')
-        return
-      }
+      if (!Number.isSafeInteger(info.fileSize) || info.fileSize <= 0) return
 
       fileInfoRef.current = info
       setFileInfo(info)
-
-      if (!isOpfsSupported() && info.fileSize > MEMORY_FALLBACK_MAX_FILE_SIZE) {
-        setSessionError(
-          'This browser cannot stream to disk, so it can only receive files up to 512 MB. Use Chrome or Edge for larger files.',
-        )
-      }
 
       setStage((previous) =>
         previous === 'waiting' || previous === 'joining' ? 'ready' : previous,
@@ -1257,10 +1240,8 @@ export function useReceiveSession(urlSessionId: string | undefined) {
       joinInFlightRef.current = true
 
       clearRequestTimer()
-      destinationRef.current = null
-      downloadModeRef.current = null
-      autoDownloadRef.current = false
-      setDownloadMode(null)
+      saveTargetRef.current = null
+      releaseReceivedFile()
       setStage('joining')
       setSessionError(null)
       addLog('Joining session…', 'connecting')
@@ -1275,7 +1256,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
         addLog('Join request timed out', 'error')
       }, JOIN_ACK_TIMEOUT)
 
-      joinSession(socket, id, (response: JoinSessionResponse) => {
+      joinSession(socket, id, getReceiverToken(id), (response: JoinSessionResponse) => {
         if (settled) return
         settled = true
         window.clearTimeout(timeout)
@@ -1298,10 +1279,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
         recoveryAttemptsRef.current = 0
         addLog('Session joined', 'success')
 
-        iceConfigPromiseRef.current = fetchIceServers(id).then((config) => {
-          setTurnAvailable(config.turnAvailable)
-          return config
-        })
+        iceConfigPromiseRef.current = fetchIceServers(id)
         void setupWebRTC(id)
 
         if (response.metadata) {
@@ -1320,11 +1298,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
               fileSize: metadata.fileSize,
             }
 
-            if (info.fileSize > MAX_FILE_SIZE) {
-              setStage('error')
-              setSessionError('The sender selected a file larger than 50 GB.')
-              return
-            }
+            if (!Number.isSafeInteger(info.fileSize) || info.fileSize <= 0) return
 
             fileInfoRef.current = info
             setFileInfo(info)
@@ -1333,19 +1307,13 @@ export function useReceiveSession(urlSessionId: string | undefined) {
               `File ready: ${info.fileName} (${formatFileSize(info.fileSize)})`,
               'success',
             )
-
-            if (!isOpfsSupported() && info.fileSize > MEMORY_FALLBACK_MAX_FILE_SIZE) {
-              setSessionError(
-                'This browser cannot stream to disk, so it can only receive files up to 512 MB. Use Chrome or Edge for larger files.',
-              )
-            }
           })
         } else {
           setStage('waiting')
         }
       })
     },
-    [addLog, clearRequestTimer, readMetadata, setupWebRTC, socket],
+    [addLog, clearRequestTimer, readMetadata, releaseReceivedFile, setupWebRTC, socket],
   )
 
   useEffect(() => {
@@ -1398,33 +1366,44 @@ export function useReceiveSession(urlSessionId: string | undefined) {
       return
     }
 
-    let mode = downloadModeRef.current
-    let destination = destinationRef.current
+    const picker = getSaveFilePicker()
+    let saveTarget: IncomingFileSinkOptions
+    let saveMode: SinkMode
 
-    if (!mode) {
-      const picker = getSaveFilePicker()
-      if (picker) {
-        try {
-          destination = await picker({ suggestedName: info.fileName })
-          mode = 'direct'
-        } catch (error) {
-          if (error instanceof DOMException && error.name === 'AbortError') {
-            addLog('Save location selection cancelled', 'info')
-            return
-          }
-          addLog(
-            'Direct save is unavailable. Using temporary browser storage instead.',
-            'info',
-          )
-          mode = 'fallback'
+    if (picker) {
+      try {
+        const destination = await picker({ suggestedName: info.fileName })
+        saveTarget = { destination }
+        saveMode = 'direct'
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          addLog('Save location selection cancelled', 'info')
+          return
         }
-      } else {
-        mode = 'fallback'
+        setSessionError('Could not open the save dialog. Please try again.')
+        addLog('Could not open the save dialog', 'error')
+        return
       }
+    } else {
+      // The quota check applies to origin storage (OPFS / memory), not to a
+      // user-chosen destination on disk, so only temporary mode needs it.
+      if (!(await hasEnoughStorage(info.fileSize))) {
+        setSessionError(
+          'There is not enough free storage in this browser for the file. Free some space and try again.',
+        )
+        addLog('Not enough free storage for the file', 'error')
+        return
+      }
+
+      // Safari and Firefox have no save picker. The sink stores the file in
+      // the browser's private file system and offers it as a download.
+      saveTarget = {}
+      saveMode = 'temporary'
+      addLog('This browser has no save picker — using temporary storage', 'info')
     }
 
     if (stageRef.current !== 'ready') {
-      addLog('The transfer already started before a save location was selected', 'info')
+      addLog('The transfer already started before a save target was chosen', 'info')
       return
     }
 
@@ -1436,14 +1415,11 @@ export function useReceiveSession(urlSessionId: string | undefined) {
       return
     }
 
-    destinationRef.current = destination
-    downloadModeRef.current = mode
-    autoDownloadRef.current = mode === 'fallback'
-    setDownloadMode(mode)
+    releaseReceivedFile()
+    saveTargetRef.current = saveTarget
     setSessionError(null)
     setRetryable(false)
     setTransferProgress(0)
-    setSaved(false)
     setTransferRate({ bytesPerSecond: null, etaSeconds: null })
     transferRateRef.current.reset()
     lastRateUiAtRef.current = 0
@@ -1457,16 +1433,17 @@ export function useReceiveSession(urlSessionId: string | undefined) {
     receivedBytesRef.current = 0
     initialOffsetRef.current = 0
     lastProgressRef.current = -1
+    recoveryAttemptsRef.current = 0
     setStage('requesting')
     addLog(
-      mode === 'direct'
+      saveMode === 'direct'
         ? 'Starting transfer to your chosen file…'
-        : 'Starting transfer with automatic download…',
+        : 'Starting transfer to temporary storage…',
       'connecting',
     )
     reportEvent('transfer.requested', {
       surface: 'receive',
-      saveMode: mode,
+      saveMode,
     })
 
     clearRequestTimer()
@@ -1480,13 +1457,16 @@ export function useReceiveSession(urlSessionId: string | undefined) {
 
     try {
       activeChannel.send(encodeControlFrame({ type: 'request-transfer' }))
+      if (sessionIdRef.current) {
+        sendTransferStart(socket, sessionIdRef.current)
+      }
     } catch (error) {
       clearRequestTimer()
       setStage('ready')
       setSessionError('Could not ask the sender to start the transfer.')
       addLog(`Could not request the transfer: ${describeError(error)}`, 'error')
     }
-  }, [addLog, clearRequestTimer])
+  }, [addLog, clearRequestTimer, releaseReceivedFile, socket])
 
   const handleRetryTransfer = useCallback(() => {
     const channel = dataChannelRef.current
@@ -1509,6 +1489,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
     receivedBytesRef.current = 0
     initialOffsetRef.current = 0
     lastProgressRef.current = -1
+    recoveryAttemptsRef.current = 0
     transferRateRef.current.reset()
     lastRateUiAtRef.current = 0
     setStage('requesting')
@@ -1529,72 +1510,7 @@ export function useReceiveSession(urlSessionId: string | undefined) {
     }, RETRY_TIMEOUT)
   }, [addLog, clearRetryTimer, failTransfer])
 
-  const handleCancelReceive = useCallback(() => {
-    const channel = dataChannelRef.current
-    if (channel?.readyState === 'open') {
-      try {
-        channel.send(
-          encodeControlFrame({ type: 'cancel', message: 'cancelled by receiver' }),
-        )
-      } catch {
-        // The channel may already be closing.
-      }
-    }
-    if (sessionIdRef.current && socket.connected) {
-      sendTransferError(socket, sessionIdRef.current, 'cancelled by receiver')
-    }
-
-    abortedRef.current = true
-    transferStartedRef.current = false
-    failedRef.current = true
-    awaitingRetryRef.current = false
-    clearRecoveryTimer()
-    clearRetryTimer()
-    clearRequestTimer()
-    destinationRef.current = null
-    downloadModeRef.current = null
-    autoDownloadRef.current = false
-    setDownloadMode(null)
-    teardownPeer()
-    abortSink()
-    setStage('error')
-    setSessionError('Receive cancelled.')
-    setRetryable(false)
-    setTransferRate({ bytesPerSecond: null, etaSeconds: null })
-    addLog('Receive cancelled', 'info')
-    reportEvent('transfer.cancelled', { surface: 'receive' })
-  }, [
-    abortSink,
-    addLog,
-    clearRecoveryTimer,
-    clearRequestTimer,
-    clearRetryTimer,
-    socket,
-    teardownPeer,
-  ])
-
-  const handleSaveFile = useCallback(() => {
-    if (!receivedFile?.url) return
-
-    triggerDownload(receivedFile.url, receivedFile.name)
-    setSaved(true)
-    addLog('Download started', 'success')
-  }, [addLog, receivedFile])
-
-  const handleCopySessionId = useCallback(async () => {
-    const id = sessionId || urlSessionId
-    if (!id) return
-
-    try {
-      await navigator.clipboard.writeText(id)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 2_000)
-    } catch {
-      addLog('Could not copy the session key', 'error')
-    }
-  }, [addLog, sessionId, urlSessionId])
-
-  const handleTryAgain = useCallback(() => {
+  const resetToInput = useCallback(() => {
     abortedRef.current = true
     transferStartedRef.current = false
     finishedRef.current = false
@@ -1603,15 +1519,15 @@ export function useReceiveSession(urlSessionId: string | undefined) {
     joinedIdRef.current = ''
     autoJoinStartedRef.current = false
     joinInFlightRef.current = false
+    peerVerifiedRef.current = false
+    clearAuthTimer()
     clearRecoveryTimer()
     clearRetryTimer()
     clearRequestTimer()
-    destinationRef.current = null
-    downloadModeRef.current = null
-    autoDownloadRef.current = false
+    saveTargetRef.current = null
+    releaseReceivedFile()
     teardownPeer()
     abortSink()
-    releaseReceivedFile()
 
     sessionIdRef.current = ''
     fileInfoRef.current = null
@@ -1628,27 +1544,71 @@ export function useReceiveSession(urlSessionId: string | undefined) {
     setSessionId('')
     setFileInfo(null)
     setReceivedFile(null)
-    setSaved(false)
     setSessionError(null)
     setRetryable(false)
-    setDownloadMode(null)
-    setTurnAvailable(null)
+    setVerificationCode(null)
     setTransferProgress(0)
     setTransferRate({ bytesPerSecond: null, etaSeconds: null })
     setStage('input')
-    addLog('Ready to receive another file', 'info')
-
     navigate('/receive', { replace: true })
+
+    // Membership is released by the server on disconnect. Without this, the
+    // peer mapping survives and a later join is refused as "already in
+    // session" until the old session's TTL runs out.
+    socket.disconnect()
+    socket.connect()
   }, [
     abortSink,
-    addLog,
+    clearAuthTimer,
     clearRecoveryTimer,
     clearRequestTimer,
     clearRetryTimer,
     navigate,
     releaseReceivedFile,
+    socket,
     teardownPeer,
   ])
+
+  const handleCancelReceive = useCallback(() => {
+    const channel = dataChannelRef.current
+    if (channel?.readyState === 'open') {
+      try {
+        channel.send(
+          encodeControlFrame({ type: 'cancel', message: 'cancelled by receiver' }),
+        )
+      } catch {
+        // The channel may already be closing.
+      }
+    }
+    if (sessionIdRef.current && socket.connected) {
+      sendTransferError(socket, sessionIdRef.current, 'cancelled by receiver')
+    }
+
+    addLog('Receive cancelled', 'info')
+    reportEvent('transfer.cancelled', { surface: 'receive' })
+
+    // Cancelling is a deliberate exit, not a failure: return to the key entry
+    // screen instead of showing the error card.
+    resetToInput()
+  }, [addLog, resetToInput, socket])
+
+  const handleCopySessionId = useCallback(async () => {
+    const id = sessionId || urlSessionId
+    if (!id) return
+
+    try {
+      await navigator.clipboard.writeText(id)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2_000)
+    } catch {
+      addLog('Could not copy the session key', 'error')
+    }
+  }, [addLog, sessionId, urlSessionId])
+
+  const handleTryAgain = useCallback(() => {
+    resetToInput()
+    addLog('Ready to receive another file', 'info')
+  }, [addLog, resetToInput])
 
   useEffect(() => {
     return () => {
@@ -1692,13 +1652,6 @@ export function useReceiveSession(urlSessionId: string | undefined) {
   const displaySessionId = sessionId || urlSessionId || ''
   const ttlNearExpiry =
     ttl.seconds !== null && ttl.seconds > 0 && ttl.seconds <= 60
-  const storageLabel =
-    receivedFile?.mode === 'direct'
-      ? 'Saved directly to your chosen location'
-      : receivedFile?.mode === 'opfs'
-        ? 'Saved to temporary browser storage'
-        : 'Buffered in memory'
-
   return {
     stage,
     sessionId,
@@ -1706,13 +1659,10 @@ export function useReceiveSession(urlSessionId: string | undefined) {
     fileInfo,
     transferProgress,
     receivedFile,
-    saved,
     copied,
     isConnected,
     sessionError,
     retryable,
-    downloadMode,
-    turnAvailable,
     transferRate,
     logs,
     ttl,
@@ -1725,12 +1675,10 @@ export function useReceiveSession(urlSessionId: string | undefined) {
     isError,
     displaySessionId,
     ttlNearExpiry,
-    storageLabel,
     handleInputSubmit,
     handleStartDownload,
     handleRetryTransfer,
     handleCancelReceive,
-    handleSaveFile,
     handleCopySessionId,
     handleTryAgain,
   }

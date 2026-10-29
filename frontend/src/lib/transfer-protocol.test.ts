@@ -37,7 +37,23 @@ describe('transfer protocol', () => {
     expect(parseControlFrame({ type: 'request-transfer' })).toEqual({
       type: 'request-transfer',
     })
+    expect(parseControlFrame({ type: 'offer-transfer' })).toEqual({
+      type: 'offer-transfer',
+    })
     expect(parseControlFrame({ type: 'retry' })).toEqual({ type: 'retry' })
+  })
+
+  it('accepts file sizes above the old 50 GB limit', () => {
+    const fileSize = 50 * 1024 ** 3 + 1
+    expect(
+      parseControlFrame({ type: 'metadata', fileName: 'huge.bin', fileSize, fileType: 'x/y' }),
+    ).not.toBeNull()
+    expect(
+      parseControlFrame({ type: 'complete', fileSize, crc32: 1 }),
+    ).not.toBeNull()
+    expect(
+      parseControlFrame({ type: 'resume', receivedBytes: fileSize, crcState: 0 }),
+    ).not.toBeNull()
   })
 
   it('rejects malformed or out-of-range frames', () => {

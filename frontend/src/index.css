@@ -12,25 +12,25 @@
 }
 
 :root {
-  --background: hsl(60 20% 97%);
-  --foreground: hsl(0 0% 17%);
-  --card: hsl(0 0% 100%);
-  --card-foreground: hsl(0 0% 17%);
-  --popover: hsl(0 0% 100%);
-  --popover-foreground: hsl(0 0% 17%);
-  --primary: hsl(162 50% 36%);
+  --background: hsl(0 0% 4%);
+  --foreground: hsl(0 0% 96%);
+  --card: hsl(0 0% 8%);
+  --card-foreground: hsl(0 0% 96%);
+  --popover: hsl(0 0% 8%);
+  --popover-foreground: hsl(0 0% 96%);
+  --primary: hsl(162 55% 42%);
   --primary-foreground: hsl(0 0% 100%);
-  --secondary: hsl(214 45% 41%);
+  --secondary: hsl(214 55% 55%);
   --secondary-foreground: hsl(0 0% 100%);
-  --muted: hsl(60 10% 94%);
-  --muted-foreground: hsl(60 4% 42%);
-  --accent: hsl(160 20% 94%);
-  --accent-foreground: hsl(0 0% 17%);
-  --destructive: hsl(0 72% 51%);
+  --muted: hsl(0 0% 12%);
+  --muted-foreground: hsl(0 0% 66%);
+  --accent: hsl(0 0% 14%);
+  --accent-foreground: hsl(0 0% 96%);
+  --destructive: hsl(0 72% 55%);
   --destructive-foreground: hsl(0 0% 100%);
-  --border: hsl(60 8% 88%);
-  --input: hsl(60 8% 84%);
-  --ring: hsl(214 45% 41%);
+  --border: hsl(0 0% 18%);
+  --input: hsl(0 0% 24%);
+  --ring: hsl(214 55% 55%);
   --radius: 0.5rem;
 }
 
@@ -68,11 +68,17 @@
 @layer base {
   * {
     border-color: var(--color-border);
+    --tw-ring-offset-color: var(--color-background);
   }
 
   html {
-    color-scheme: light;
+    color-scheme: dark;
     -webkit-text-size-adjust: 100%;
+  }
+
+  ::selection {
+    background-color: hsl(214 55% 55% / 0.35);
+    color: var(--color-foreground);
   }
 
   body {

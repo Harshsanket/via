@@ -46,10 +46,16 @@ export function truncateFileName(fileName: string, limit = 20): string {
  * Produces a filename safe to hand to `link.download`:
  * no path separators, control characters, or Windows-reserved characters.
  */
+// Bidi overrides and zero-width formatting characters can make a name look
+// like a different file (e.g. hide the real extension), so they never survive.
+const FORMAT_CONTROL_PATTERN =
+  /[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/
+
 export function sanitizeFileName(fileName: string): string {
   const cleaned = Array.from(fileName, (character) => {
     const code = character.charCodeAt(0)
     if (code <= 0x1f || code === 0x7f) return '_'
+    if (FORMAT_CONTROL_PATTERN.test(character)) return '_'
     return /[\\/:*?"<>|]/.test(character) ? '_' : character
   })
     .join('')

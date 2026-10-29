@@ -21,7 +21,6 @@ import type {
   TransferCompleteEvent,
   TransferErrorEvent,
 } from '../socket/Types'
-import { MAX_FILE_SIZE } from './constants'
 
 const MAX_NAME_LENGTH = 2048
 const MAX_MIME_LENGTH = 255
@@ -53,9 +52,8 @@ const parseMetadata = (value: unknown): FileMetadata | null | undefined => {
     !isBoundedString(value.fileName, MAX_NAME_LENGTH) ||
     value.fileName.length === 0 ||
     !isBoundedString(value.mimeType, MAX_MIME_LENGTH) ||
-    !Number.isInteger(value.fileSize) ||
-    (value.fileSize as number) <= 0 ||
-    (value.fileSize as number) > MAX_FILE_SIZE
+    !Number.isSafeInteger(value.fileSize) ||
+    (value.fileSize as number) <= 0
   ) {
     return undefined
   }

@@ -2,6 +2,8 @@
 
 Private, browser-to-browser file sharing for your home network.
 
+**Version 1.0.0** · [Release notes](CHANGELOG.md) · [GPL-3.0-only](LICENSE)
+
 ---
 
 ## Overview
@@ -12,7 +14,7 @@ You run Via yourself, in Docker, on one computer that stays on. Everyone at home
 
 **What you get**
 
-- **Direct transfers:** files stream peer to peer, up to 50 GB, with resume after a dropped connection and a checksum check at the end.
+- **Direct transfers:** files stream peer to peer with no fixed size cap, straight into the file you pick, with resume after a dropped connection and a checksum check at the end.
 - **End-to-end verification:** each share link carries a secret key that the server never sees. Both browsers prove to each other that they hold it before any data moves, and both screens show the same 6-digit security code.
 - **A server that knows little:** it only introduces the two devices. File names are encrypted before it stores them.
 - **Home-only:** nothing is opened on your router, so the site doesn't exist outside your network.
@@ -24,7 +26,20 @@ The project has two parts, each in its own repository folder:
 |---|---|
 | `frontend/` | React + Vite single-page app: the send and receive pages, WebRTC transfer, and end-to-end checks |
 | `backend/` | Node.js + Express + Socket.IO signaling server, with Redis for short-lived sessions |
-| `docker/`, `docker-compose.yml` | The home-network deployment: Caddy (HTTPS), nginx, the API, Redis and a DuckDNS updater |
+| `docker/`, `docker-compose.yml` | The home-network deployment: Caddy (HTTPS), nginx, the API, Redis, coturn and a DuckDNS updater |
+
+---
+
+## What's new in 1.0.0
+
+- **Transfers resume after a dropped connection** and verify the result with a CRC32 checksum, retrying automatically when it does not match.
+- **Direct-to-disk receiving** in Chrome and Edge, with an OPFS or in-memory fallback and a free-space check before the sender starts.
+- **A fallback relay is part of the stack.** coturn handles the rare network where two LAN devices cannot connect directly; files stay DTLS-encrypted end to end.
+- **Automatic LAN detection.** `./scripts/start.sh` finds the host's address, updates `LAN_IP`, and starts Compose, so the DuckDNS record and relay always point at the right place.
+- **Stricter session handling:** role checks for `transfer-start` and `transfer-complete`, receiver-tab reclaim tokens, configurable session lifetimes, and a shortened TTL after completion.
+- **A refreshed interface** with an aurora background, a file-details card, clearer progress, and the shared 6-digit security code.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ---
 
@@ -40,7 +55,7 @@ The project has two parts, each in its own repository folder:
 
 **Browsers that can use it**
 
-Any current Chrome, Edge, Firefox or Safari, on desktop or mobile. Very large files (over 512 MB) need a browser that can write to disk while receiving, such as Chrome or Edge.
+Any current Chrome, Edge, Firefox or Safari can send and receive. Chrome and Edge save straight to a file you choose (the File System Access API); Safari and Firefox store the file temporarily and offer it as a download.
 
 **To develop it**
 
@@ -54,15 +69,9 @@ Any current Chrome, Edge, Firefox or Safari, on desktop or mobile. Very large fi
 
 ### 1. Give the host computer a fixed home IP
 
-Find its current IP:
+`./scripts/start.sh` detects this computer's LAN address automatically and writes it to `LAN_IP` in `.env` before every start, so the DuckDNS record and the TURN relay always use the current address.
 
-| OS | Command |
-|---|---|
-| macOS | `ipconfig getifaddr en0` (Wi‑Fi) or `en1` |
-| Linux | `hostname -I` |
-| Windows | `ipconfig`, then look for "IPv4 Address" |
-
-In your router's admin page, add a **DHCP reservation** (also called a "static lease" or "address reservation") for this computer, so the IP never changes.
+A **DHCP reservation** (also called a "static lease" or "address reservation") in your router's admin page is still recommended, so the address is stable instead of merely corrected on each start.
 
 ### 2. Create a free DuckDNS subdomain
 
@@ -81,12 +90,14 @@ In your router's admin page, add a **DHCP reservation** (also called a "static l
 cp .env.example .env
 ```
 
-Fill in `.env`. Every key is described under [Configuration](#configuration).
+Fill in the deployment secrets in the root `.env`. Every key is described under [Configuration](#configuration).
+
+For local development, the apps use their own files: copy `backend/.env.example` to `backend/.env` and `frontend/.env.example` to `frontend/.env`.
 
 ### 4. Start it
 
 ```bash
-docker compose up -d --build
+./scripts/start.sh
 ```
 
 The first start takes a few minutes. Watch Caddy get the certificate:
@@ -109,17 +120,24 @@ On any phone or laptop **on the same Wi‑Fi**, open `https://yourname-via.duckd
 
 ## Configuration
 
-### `.env` (read by `docker-compose.yml`)
+### Root `.env` (read by `docker-compose.yml`)
+
+Deployment secrets only.
 
 | Key | Value |
 |---|---|
 | `DUCKDNS_DOMAIN` | The subdomain only, e.g. `yourname-via` |
 | `VIA_HOST` | The full name, e.g. `yourname-via.duckdns.org` |
 | `DUCKDNS_TOKEN` | Your DuckDNS token |
-| `LAN_IP` | The host's fixed home IP, e.g. `192.168.0.240` |
+| `LAN_IP` | The host's LAN IP. `scripts/start.sh` detects and writes it; override with `VIA_LAN_IP=…` |
 | `REDIS_PASSWORD` | A long random string, e.g. the output of `openssl rand -hex 32` |
+| `TURN_SECRET` | Another long random string, shared by the API and coturn |
 
 Never commit or share `.env`. It's already listed in `.gitignore` and `.dockerignore`.
+
+### `backend/.env` and `frontend/.env` (local development only)
+
+These are read by `npm run dev` in each app and are not used by Docker Compose. Start from the matching `.env.example`. The frontend only sees variables prefixed with `VITE_`.
 
 ### Backend environment (set in `docker-compose.yml`)
 
@@ -131,12 +149,18 @@ You don't normally need to change these for a home deployment.
 | `CLIENT_ORIGIN` | *(empty)* | Comma-separated allowed browser origins. If empty, production accepts only the site's own origin |
 | `TRUSTED_PROXIES` | `127.0.0.1/32,::1` | Addresses allowed to report the client IP (`X-Real-IP`): IPv4 CIDRs, single IPs, or `::1` |
 | `MAX_SOCKETS_PER_IP` | `20` | Concurrent connections allowed from one client address |
-| `STUN_URLS` | Google STUN | STUN servers handed to browsers; empty for a LAN-only setup |
-| `TURN_URLS`, `TURN_SECRET` | *(unset)* | Optional TURN relay. Not needed on a single home network |
+| `STUN_URLS` | Google STUN | STUN servers handed to browsers. Compose points this at coturn (`stun:$VIA_HOST:3478`) so LAN discovery stays local |
+| `TURN_URLS`, `TURN_SECRET` | *(unset)* | TURN relay URLs and the shared secret used to sign short-lived credentials. Compose sets both to the coturn service |
 | `PORT` | `3000` | HTTP port |
 | `LOG_LEVEL` | `info` | `debug` adds per-message signaling logs |
+| `SESSION_TTL_SECONDS` | `600` | Initial session lifetime |
+| `REFRESH_SESSION_TTL_SECONDS` | `1800` | Lifetime granted when a peer joins or the session refreshes |
 | `SESSION_MAX_LIFETIME_SECONDS` | `86400` | Absolute cap on a session's age |
+| `SESSION_EXPIRY_WARNING_SECONDS` | `30` | How long before expiry the server warns clients; `0` disables it |
+| `COMPLETED_SESSION_TTL_SECONDS` | `30` | Window both peers get to see a completed transfer before the session closes |
+| `RECOVERY_WINDOW_SECONDS` | `120` | How long a dropped socket may recover before cleanup |
 | `MAX_ACTIVE_SESSIONS_PER_PEER` | `1` | Sessions one connection may own |
+| `MAX_FILE_SIZE_BYTES` | `0` | Largest announced file size; `0` means no server-side cap |
 
 ### Frontend build arguments
 
@@ -145,6 +169,7 @@ You don't normally need to change these for a home deployment.
 | `VITE_SOCKET_SERVER_URL` | *(empty, meaning same origin)* | Signaling server URL. Leave empty when nginx serves both |
 | `VITE_API_BASE_URL` | *(derived)* | REST base for `/api/v1` |
 | `VITE_ERROR_REPORTING_URL` | *(unset)* | Optional endpoint for anonymous error reports. If you set it to another host, also allow that host in the CSP in `docker/web.nginx.conf` |
+| `VITE_MAX_RECOVERY_ATTEMPTS` | `2` | How many times a broken transfer is retried |
 
 ---
 
@@ -183,18 +208,21 @@ Anyone outside who looks up the name gets a private IP that leads nowhere.
 ```
 
 - **Signaling:** the backend's Socket.IO server pairs the two browsers and passes connection details between them. Sessions live in Redis and expire on their own.
+- **Fallback relay:** if the two devices cannot reach each other directly (AP isolation, blocked mDNS, VPN), ICE falls back to the LAN coturn. It forwards the already-DTLS-encrypted packets, so the server still never sees a file's name or contents.
 - **Verification:** before anything else is accepted on the data channel, each side sends an HMAC that only the key holder can compute. It covers both sides' DTLS certificate fingerprints, so if anything relayed a substituted connection, the values don't match and the transfer stops.
-- **Transfer:** the file is sent in chunks with back-pressure. The receiver writes to disk where the browser allows (the Origin Private File System, or a file you choose) and checks a CRC32 checksum at the end. Interrupted transfers resume from the last confirmed byte.
+- **Transfer:** the file is sent in chunks with back-pressure. The receiver checks a CRC32 at the end. Chrome/Edge write straight to the file you pick; Safari/Firefox store it temporarily (OPFS, or memory as a last resort) and offer it as a download. Interrupted transfers resume from the last confirmed byte.
 
 ### The containers
 
 ```
  LAN ──443──▶ caddy ──edge──▶ web ──app──▶ api ──data──▶ redis
               (TLS)         (nginx +     (signaling)    (sessions)
-                             frontend)
+                             frontend)          │
+ LAN ──3478──▶ coturn ◀──── edge ───────────────┘
+              (fallback relay; the API only mints its credentials)
 ```
 
-`app` and `data` are internal networks with no route out: the API and Redis can't reach the internet, and only the API can reach Redis. A small `ddns` container keeps the DuckDNS name pointed at your home IP.
+`app` and `data` are internal networks with no route out: the API and Redis can't reach the internet, and only the API can reach Redis. coturn is only the fallback when two LAN devices cannot connect directly; a small `ddns` container keeps the DuckDNS name pointed at your home IP.
 
 ---
 
@@ -225,13 +253,14 @@ The certificate is kept in a Docker volume, so rebuilding doesn't request a new 
 | `web` | nginx-unprivileged + the built frontend | uid 101 | Serves the app and proxies `/api` and `/socket.io` to `api` |
 | `api` | Node 24 (production dependencies only) | uid 1000 | Signaling server, no internet access |
 | `redis` | Redis 7.4 | uid 999 | Password required, no persistence, internal network only |
+| `coturn` | coturn 4.6 | uid 65534, with only `NET_BIND_SERVICE` | Fallback relay for direct-connection failures; cannot reach the Docker networks, loopback or link-local space |
 | `ddns` | Alpine | uid 65534 | Re-pins the DuckDNS record to `LAN_IP` every hour |
 
-Every service has a read-only filesystem, drops all Linux capabilities, can't gain privileges, and has memory and process limits.
+Every service has a read-only filesystem, can't gain privileges, and has memory and process limits; all but caddy and coturn drop every Linux capability.
 
 ### Host computer settings
 
-- **Firewall:** allow incoming connections for Docker on ports 80 and 443. The TURN relay is off, because devices on one Wi‑Fi connect directly.
+- **Firewall:** allow incoming connections for Docker on ports 80, 443, 3478 (TCP and UDP) and UDP 49300-49340 (the relay range).
 - **Sleep:** stop the computer sleeping, or the site disappears.
 - **Auto-start:** set Docker to start at login. The containers restart on their own (`restart: unless-stopped`).
 - **Don't forward any ports** on your router. Via is designed to stay inside your home network.
@@ -248,13 +277,14 @@ The root `Dockerfile` (with `docker/entrypoint.sh` and `docker/nginx.conf`) buil
 |---|---|
 | The name resolves on mobile data but not on Wi‑Fi | Your router has **DNS rebinding protection**, which blocks public names that point at home IPs. Add `duckdns.org` to its exceptions, or use a public DNS server on the device |
 | A device uses a privacy DNS or VPN (Mullvad, NextDNS, AdGuard, Pi-hole…) and the name doesn't resolve | Many of these block answers that point at home IPs. Allow the name in that service, or turn the filter off on your home network |
-| Devices can't reach each other or the host | Turn off **AP / client isolation** on the Wi‑Fi. Guest networks usually have it on |
+| Devices can't reach each other or the host | Turn off **AP / client isolation** on the Wi‑Fi. Guest networks usually have it on. If they still can't, check `docker compose ps coturn` is healthy and that ports 3478 and UDP 49300-49340 reach the host |
+| Metadata arrives but the file never starts | The direct path failed and the relay isn't reachable. Confirm `TURN_SECRET` is set in `.env`, `docker compose logs coturn` shows no auth errors, and the firewall allows the TURN ports |
 | Caddy's log shows DNS or ACME errors | Check `DUCKDNS_TOKEN` and `DUCKDNS_DOMAIN` in `.env`, then run `docker compose restart caddy` |
 | The site stopped working after the router rebooted | The host got a new IP. Add the DHCP reservation, update `LAN_IP`, then run `docker compose up -d` |
 | "This link is missing its security key" | The link was shortened or cut off. Share the complete link, including the part after `#k=` |
 | "Security check failed" | The two browsers couldn't verify each other: a wrong or edited link, or something in between. Start a new transfer with a fresh link |
 | "too many requests" or HTTP 429 | A client sent far more than normal use. Wait a moment and retry. On Docker Desktop, every device may appear as one address, so the limits are shared per household |
-| Large files fail on one browser | Browsers that can't write to disk while receiving are limited to 512 MB. Use Chrome or Edge |
+| Receiving fails on one browser | Chrome and Edge save directly. Browsers without the File System Access API fall back to OPFS, or to memory for files under 512 MB. Use Chrome or Edge for large files |
 
 ---
 
@@ -290,7 +320,8 @@ The integration suites cover sessions, origin checks, session integrity, payload
 | Command | What it does |
 |---|---|
 | `docker compose config --quiet` | Validate the compose file and `.env` |
-| `docker compose up -d --build` | Build and start everything |
+| `./scripts/start.sh` | Detect `LAN_IP`, update `.env`, build and start everything |
+| `docker compose up -d --build` | Build and start everything using the current `.env` |
 
 Both repositories run CI on every push and pull request: dependency audit, formatting or lint, unit and integration or end-to-end tests, and a container build. Dependabot keeps npm packages, Docker images and GitHub Actions current.
 

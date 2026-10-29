@@ -1,4 +1,5 @@
 import { ApiError } from "../../utils/api-error.js";
+import { env } from "../env.js";
 import { logger } from "../../utils/logger.js";
 import { isSessionId } from "../../utils/validators.js";
 import {
@@ -8,7 +9,6 @@ import {
   recordViolation,
 } from "./rate-limit.js";
 import { isSessionExist } from "../redis/service.js";
-import type { FileMetaData } from "../redis/types.js";
 import type {
   AnswerPayload,
   IceCandidatePayload,
@@ -26,8 +26,6 @@ import type {
   StoreFileMetadataPayload,
   ViaSocket,
 } from "./types.js";
-
-export const MAX_FILE_SIZE: number = 50 * 1024 * 1024 * 1024;
 
 // Upper bounds for client strings. Without them every field was limited only
 // by maxHttpBufferSize (100 kB), and was stored in Redis and written to logs.
@@ -160,7 +158,11 @@ export const isValidFileMetadata = (metadata: unknown): boolean => {
   if (m.fileName.trim().length === 0) return false;
   if (!isAcceptableFileName(m.fileName)) return false;
 
-  if (m.fileSize <= 0 || m.fileSize > MAX_FILE_SIZE) {
+  if (
+    !Number.isSafeInteger(m.fileSize) ||
+    m.fileSize <= 0 ||
+    (env.maxFileSizeBytes > 0 && m.fileSize > env.maxFileSizeBytes)
+  ) {
     return false;
   }
 
@@ -183,8 +185,23 @@ export const parseSessionPayload = (
   return { sessionId: payload.sessionId };
 };
 
-export const parseJoinSessionPayload = (payload: unknown): JoinSessionPayload =>
-  parseSessionPayload(payload, "session id invalid");
+export const parseJoinSessionPayload = (
+  payload: unknown,
+): JoinSessionPayload => {
+  const { sessionId } = parseSessionPayload(payload, "session id invalid");
+  const receiverToken = isRecord(payload) ? payload.receiverToken : undefined;
+
+  if (receiverToken === undefined) return { sessionId };
+
+  if (
+    typeof receiverToken !== "string" ||
+    !/^[A-Za-z0-9_-]{8,128}$/.test(receiverToken)
+  ) {
+    throw new InvalidPayloadError("receiver token invalid");
+  }
+
+  return { sessionId, receiverToken };
+};
 
 export const parseStoreFileMetadataPayload = (
   payload: unknown,

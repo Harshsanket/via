@@ -10,7 +10,8 @@ The frontend is built with React, TypeScript, Tailwind CSS, and Vite. A small si
 - Connects two browsers directly over an encrypted WebRTC data channel.
 - Starts the sender automatically when the receiver clicks **Download**.
 - Saves directly to the receiver's chosen file in Chromium/Edge using the File System Access API.
-- Falls back to OPFS/memory streaming and an automatic download in other browsers.
+- Falls back to OPFS or in-memory temporary storage and a download in browsers without the File System Access API.
+- Checks free space with `navigator.storage.estimate()` before asking the sender to start.
 - Transfers files in chunks with backpressure, live speed, ETA, pause, and cancel controls.
 - Resumes an interrupted transfer after the data channel reconnects, from the receiver's confirmed byte offset.
 - Retries automatically when the receiver's CRC32 checksum does not match.
@@ -48,14 +49,14 @@ Sender                        Signaling server                     Receiver
 1. The sender creates a session and shares the resulting link.
 2. Socket.IO carries session events, SDP offers/answers, and ICE candidates.
 3. The browsers establish a direct WebRTC data channel.
-4. The receiver clicks **Download**. Chromium/Edge opens a save dialog; other browsers use temporary storage.
+4. The receiver clicks **Download**. Chrome/Edge open a save dialog; other browsers use temporary storage.
 5. The receiver sends `request-transfer` over the data channel.
 6. The sender transmits the file in 64 KB chunks, pausing when the send buffer fills.
-7. Chunks stream directly to the chosen file, or to OPFS/memory when direct save is unavailable.
+7. Chunks stream directly into the chosen file, or into OPFS/memory when no save picker is available.
 8. If the data channel drops, both peers renegotiate it and resume from the receiver's last confirmed byte.
 9. The receiver checks the byte count and CRC32 checksum, then emits `transfer-complete`.
 10. On a checksum failure, the receiver can request a fresh copy without restarting the session.
-11. Direct saves are already on disk; fallback mode auto-downloads and keeps a Save button as a backup.
+11. Direct saves are already on disk; temporary mode offers the finished file as a download.
 
 ## Setup
 
@@ -64,7 +65,7 @@ Sender                        Signaling server                     Receiver
 - Node.js 20+ (developed on Node 24; CI uses Node 22)
 - npm 10+
 - A running [Via signaling server](https://github.com/Harshsanket/via)
-- A browser with WebRTC support; Chromium-based browsers also support OPFS streaming
+- A browser with WebRTC support; Chromium/Edge can save directly, others receive into temporary storage
 - HTTPS in production (required by WebRTC, clipboard, and most browsers)
 
 ### 1. Start the backend
@@ -170,7 +171,7 @@ See [`docs/DOCKER.md`](docs/DOCKER.md) for architecture, configuration, security
 
 CI runs `npm ci`, a high-severity dependency audit, lint, unit tests, a production build, Playwright end-to-end tests, and a Docker image build/smoke test on pushes to `main` and pull requests. Dependabot keeps npm and GitHub Actions dependencies current.
 
-Unit tests cover the transfer protocol guards, CRC32 state/resume, direct/OPFS/memory file sinks, rate/ETA calculation, formatting, and validation. Playwright verifies the real WebRTC flow in Chromium against a mock signaling server: receiver-initiated download, direct save, automatic fallback download, checksum retry, mid-transfer channel recovery, and the backend-offline banner.
+Unit tests cover the transfer protocol guards, CRC32 state/resume, the direct file sink, storage checks, rate/ETA calculation, formatting, and validation. Playwright verifies the real WebRTC flow in Chromium against a mock signaling server: receiver-initiated download, direct save, a low-storage refusal, checksum retry, mid-transfer channel recovery, and the backend-offline banner.
 
 To run the transfer test against the real signaling backend, start Via with Redis and TURN, allow `http://127.0.0.1:4173` in `CLIENT_ORIGIN`, then run:
 
@@ -186,7 +187,7 @@ src/
   main.tsx                 # React entry point
   components/              # Header, footer, banners, progress, error alerts, UI primitives
   hooks/                   # Logger, session TTL, socket status, media query
-  lib/                     # Env, CRC32, OPFS sink, ICE, protocol, rate, telemetry, WebRTC
+  lib/                     # Env, CRC32, direct sink, ICE, protocol, rate, storage, telemetry, WebRTC
   pages/
     Home.tsx
     NotFound.tsx
@@ -202,8 +203,8 @@ LICENSE                    # GNU GPLv3
 
 ## Browser Support and Limits
 
-- **Storage:** Chromium/Edge stream directly to a user-chosen file through the File System Access API. Other browsers stream to OPFS, or a memory buffer capped at 512 MB when OPFS is unavailable.
-- **Save fallback:** If direct save is unavailable, the verified file downloads automatically. A Save button remains visible if the browser blocks the automatic download.
+- **Storage:** Chromium/Edge stream directly to a user-chosen file through the File System Access API. Before asking the sender to start, the app checks `navigator.storage.estimate()` and refuses when free space is clearly insufficient.
+- **Browser support:** Browsers without the File System Access API (for example Firefox and Safari) receive into OPFS, or into memory when OPFS is unavailable. The in-memory path is capped at 512 MB.
 - **Aborted direct saves:** A cancelled or failed direct save can leave a partial file at the chosen location; the UI reports the failure.
 - **TURN:** The app requests ephemeral TURN credentials from the backend. If TURN is not configured, it falls back to public STUN, and symmetric NAT or restrictive firewalls may block the transfer.
 - **Resume:** The app renegotiates a dropped data channel and resumes from the receiver's confirmed offset. Recovery is bounded to a 45-second window; after that, start a new transfer.
@@ -227,7 +228,7 @@ Developed and maintained by **Harsh Sanket**.<br>
 | Frontend          | React 19, TypeScript, React Router 7               |
 | Build tooling     | Vite 7, npm                                        |
 | Styling           | Tailwind CSS v4, class-variance-authority, Lucide  |
-| File transfer     | WebRTC data channels, Socket.IO client, OPFS, File System Access |
+| File transfer     | WebRTC data channels, Socket.IO client, File System Access |
 | Integrity         | Incremental CRC32                                  |
 | Testing           | Vitest, Playwright                                 |
 | Code quality      | ESLint, TypeScript strict mode                     |

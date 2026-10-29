@@ -22,7 +22,7 @@ export default function ConnectionBanner() {
     <div
       role="status"
       aria-live="polite"
-      className="mx-4 mt-2 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-950 sm:mx-6"
+      className="pointer-events-none absolute left-1/2 top-[4.5rem] z-40 flex w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-100 backdrop-blur-md"
     >
       <span className="flex items-center gap-2">
         <WifiOff className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -35,7 +35,7 @@ export default function ConnectionBanner() {
       <button
         type="button"
         onClick={status.retryNow}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900 transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-600 focus-visible:ring-offset-2"
+        className="pointer-events-auto inline-flex items-center gap-1.5 rounded-lg border border-amber-400/50 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-100 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2"
       >
         <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
         Retry now

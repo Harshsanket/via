@@ -47,7 +47,7 @@ via/                      ← project root: NOT a git repository
 | Rate limits and per-IP cap | `config/socket/rate-limit.ts` | — |
 | Origin / CORS | `config/env.ts` (`isAllowedOrigin`), `server.ts` (`allowRequest`), `middleware/cors-middleware.ts` | — |
 | End-to-end verification and encryption | — | `lib/peer-auth.ts`; used in `pages/send/useSendSession.ts` and `pages/receive/useReceiveSession.ts` |
-| File writing | — | `lib/file-sink.ts` (OPFS, picker, memory; stale `.part` sweep) |
+| File writing | — | `lib/file-sink.ts` (save picker when available; otherwise OPFS/in-memory temporary sink offered as a download) |
 
 ---
 
@@ -56,16 +56,16 @@ via/                      ← project root: NOT a git repository
 ### Run the whole stack (what the owner uses)
 
 ```bash
-cp .env.example .env        # fill DUCKDNS_*, VIA_HOST, LAN_IP, REDIS_PASSWORD
+cp .env.example .env        # fill DUCKDNS_*, VIA_HOST, REDIS_PASSWORD (and TURN_SECRET)
 ```
 ```bash
-docker compose up -d --build
+./scripts/start.sh          # detects LAN_IP, updates .env, then compose up -d --build
 ```
 ```bash
 docker compose ps           # all healthy; caddy/ddns show "Up"
 ```
 
-The live instance is `https://hs-via.duckdns.org` → `192.168.0.240`. From the host, `curl --resolve hs-via.duckdns.org:443:192.168.0.240 …` bypasses local DNS. The owner's Mac uses Mullvad DNS, which doesn't resolve the name.
+The live instance is `https://hs-via.duckdns.org` → the host's LAN IP (currently `192.168.0.104`; `scripts/start.sh` detects it). From the host, `curl --resolve hs-via.duckdns.org:443:192.168.0.104 …` bypasses local DNS. The owner's Mac uses Mullvad DNS, which doesn't resolve the name.
 
 ### Backend development
 
@@ -76,10 +76,13 @@ cd backend
 npm ci
 ```
 ```bash
+cp .env.example .env       # app config lives here, not in the root .env
+```
+```bash
 npm run db:up              # test Redis :6379 + coturn :3478 (backend/docker-compose.yml)
 ```
 ```bash
-REDIS_URL=redis://127.0.0.1:6379 npm run dev
+npm run dev
 ```
 
 `NODE_ENV` isn't production in dev, so any origin is allowed when `CLIENT_ORIGIN` is empty.
@@ -93,7 +96,10 @@ cd frontend
 npm ci
 ```
 ```bash
-VITE_SOCKET_SERVER_URL=http://127.0.0.1:3000 npm run dev
+cp .env.example .env      # VITE_* app config lives here
+```
+```bash
+npm run dev
 ```
 
 Web Crypto (used for verification) needs a secure context. `localhost` and `127.0.0.1` count; a LAN IP over plain HTTP doesn't.
@@ -129,10 +135,12 @@ Web Crypto (used for verification) needs a secure context. `localhost` and `127.
 - **Session IDs are server-issued UUIDs** (`isSessionId`). Test fixtures must use UUID-shaped IDs; the smoke script uses `SAMPLE_SESSION_ID`.
 - **Roles:**
   - only the creator may `store-file-metadata`, once;
-  - only the receiver may send `transfer-complete`, and the server relays the **stored** name;
+  - only the receiver may send `transfer-start` and `transfer-complete`, and the server relays the **stored** name on completion;
   - a peer can't join its own session or a second session.
+  - before `transfer-start`, the same receiver tab (proven by the `receiverToken` it keeps in `sessionStorage`) may replace the recorded receiver even if its socket is still connected; a different peer is refused as full. After `transfer-start`, a live receiver keeps the slot.
 
   All of these are enforced inside Lua scripts.
+- **A completed transfer shortens the session.** `transfer-complete` sets the Redis TTL to `COMPLETED_SESSION_TTL_SECONDS` (default 30, capped by `SESSION_MAX_LIFETIME_SECONDS`), pushes `session:expiring` to both peers, and reschedules the expiry timer. Keep the Lua TTL and the push in step.
 - **Never write a session hash with a plain `HSET` after a separate existence check.** It can recreate the hash with no TTL. Use the `EXISTS`-guarded scripts in `scripts.ts`.
 - **Connection recovery:** Socket.IO fires `disconnect` even for recoverable drops.
   - Cleanup is deferred by `RECOVERY_WINDOW_MS` for `transport close`, `transport error` and `ping timeout`, and cancelled when `socket.recovered` is set.
@@ -165,12 +173,13 @@ Web Crypto (used for verification) needs a secure context. `localhost` and `127.
   | `app` | `172.30.1.0/24` | `TRUSTED_PROXIES` for `api` |
 
   Get these wrong and the per-IP limits either trust spoofed headers or lump every client together.
-- **`caddy` needs `cap_add: [NET_BIND_SERVICE]`.** Its binary carries that file capability, and with `cap_drop: ALL` alone it won't start.
+- **`caddy` and `coturn` need `cap_add: [NET_BIND_SERVICE]`.** Their binaries carry that file capability, and with `cap_drop: ALL` alone they won't exec.
 - **Caddy's DNS-01 resolvers are `9.9.9.9 8.8.8.8`.** `1.1.1.1` is refused on the owner's network, and switching back breaks certificate renewal there.
 - **`redis` runs as `user: "999:1000"`** with a read-only root and a tmpfs `/data`. Its health check authenticates through `REDISCLI_AUTH`. The `api`'s `REDIS_URL` embeds `REDIS_PASSWORD`.
 - **`app` and `data` are `internal: true`.** The API has no internet access. If you add a feature that needs it (external STUN, error reporting), that's a design decision; don't just make the network external.
 - **CSP `connect-src 'self' wss://$host`.** Any new external endpoint needs a CSP change in `docker/web.nginx.conf`.
-- **TURN stays off** for the LAN deployment. If anyone re-enables it (single-container image only), keep the `denied-peer-ip` rules in `entrypoint.sh`. Without them the relay can reach the Docker networks and the host.
+- **`LAN_IP` is detected by `scripts/start.sh`**, which rewrites that one line in `.env` and then runs Compose. The `ddns` container re-asserts the DuckDNS record hourly, but only for the address it started with: rerun the script (or `docker compose up -d` after editing `.env`) when the host changes networks. `VIA_LAN_IP` overrides detection.
+- **`coturn` is the fallback relay, not the default path.** It is on `edge`, publishes 3478 (TCP/UDP) and UDP 49300-49340, and advertises `LAN_IP` via `--external-ip`. Its `denied-peer-ip` rules must keep it out of `172.16.0.0/12` (Docker networks) and `192.168.65.0/24` (Docker Desktop's NAT), plus loopback and link-local. `api` and `coturn` share `TURN_SECRET`; never expose that value to a client. Removing the relay is fine for same-LAN use, but phone↔computer transfers fail where AP isolation or blocked mDNS prevents a direct path.
 - **Docker Desktop on macOS shows clients as `192.168.65.1`,** so the per-IP limits effectively apply per household. Size them for that.
 - **Never forward router ports, and never print, commit or upload `.env`.** It holds the DuckDNS token and the Redis password.
 - **The Caddy volumes `caddy_data` and `caddy_config` hold the certificate.** Don't delete them casually: Let's Encrypt rate-limits repeated issuance.

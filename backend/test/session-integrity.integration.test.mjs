@@ -190,6 +190,188 @@ test("M1: a recovered connection keeps its session and mapping", async () => {
   }
 });
 
+test("M1: a refreshed receiver reclaims its slot before deferred cleanup", async () => {
+  const sender = await pool.connect();
+  const receiver = await pool.connect();
+  const sessionId = await createSession(sender);
+
+  assert.equal(
+    (await emitAck(receiver, "join-session", { sessionId }))?.success,
+    true,
+  );
+
+  // A page reload drops the transport without a clean disconnect, which the
+  // server treats as recoverable and cleans up only after the recovery window.
+  const left = waitFor(sender, "peer-left");
+  receiver.io.engine.close();
+  await left;
+
+  // The new page arrives as a new socket and must not be locked out for the
+  // rest of the recovery window: the old page is never coming back.
+  const replacement = await pool.connect();
+  const joinedAgain = waitFor(sender, "peer-joined");
+  // Retry a couple of times (below the event's rate limit) in case the
+  // server has not observed the old socket's close yet.
+  let rejoin = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    rejoin = await emitAck(replacement, "join-session", { sessionId });
+    if (rejoin?.success) break;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+
+  assert.equal(
+    rejoin?.success,
+    true,
+    `the refreshed receiver was locked out: ${rejoin?.message}`,
+  );
+  await joinedAgain;
+
+  assert.equal(await redis.get(`peer:${replacement.id}`), sessionId);
+  assert.equal(
+    await redis.get(`peer:${receiver.id}`),
+    null,
+    "the stale member mapping survived the takeover",
+  );
+  assert.equal(
+    await redis.hGet(`session:${sessionId}`, "connectedPeer"),
+    replacement.id,
+  );
+  assert.equal(await redis.hGet(`session:${sessionId}`, "connectedPeers"), "1");
+
+  sender.disconnect();
+  replacement.disconnect();
+});
+
+test("M1: a refresh before the transfer starts replaces a still-connected receiver", async () => {
+  const sender = await pool.connect();
+  const receiver = await pool.connect();
+  const sessionId = await createSession(sender);
+  const receiverToken = "tab-token-refresh-1";
+
+  assert.equal(
+    (await emitAck(receiver, "join-session", { sessionId, receiverToken }))
+      ?.success,
+    true,
+  );
+
+  // A reloaded page can arrive before the server has observed the old
+  // transport's close. It keeps the tab's token, so the backend can tell it is
+  // the same receiver rather than a third peer.
+  const replacement = await pool.connect();
+  const replaced = waitFor(receiver, "session:error");
+  const joinedAgain = waitFor(sender, "peer-joined");
+  const rejoin = await emitAck(replacement, "join-session", {
+    sessionId,
+    receiverToken,
+  });
+
+  assert.equal(
+    rejoin?.success,
+    true,
+    `the refreshed receiver was locked out: ${rejoin?.message}`,
+  );
+  assert.match(
+    (await replaced)?.message ?? "",
+    /replaced by a newer connection/i,
+  );
+  await joinedAgain;
+
+  assert.equal(await redis.get(`peer:${replacement.id}`), sessionId);
+  assert.equal(
+    await redis.get(`peer:${receiver.id}`),
+    null,
+    "the replaced member mapping survived the takeover",
+  );
+  assert.equal(
+    await redis.hGet(`session:${sessionId}`, "connectedPeer"),
+    replacement.id,
+  );
+
+  // The old socket must no longer be able to act on the session.
+  const denied = waitFor(receiver, "session:error");
+  receiver.emit("get-file-metadata", {
+    sessionId,
+    peerId: receiver.id,
+  });
+  assert.equal((await denied)?.success, false);
+
+  sender.disconnect();
+  receiver.disconnect();
+  replacement.disconnect();
+});
+
+test("M1: a different tab cannot take a live receiver's slot before the transfer", async () => {
+  const sender = await pool.connect();
+  const receiver = await pool.connect();
+  const intruder = await pool.connect();
+  const sessionId = await createSession(sender);
+
+  assert.equal(
+    (
+      await emitAck(receiver, "join-session", {
+        sessionId,
+        receiverToken: "tab-token-owner-1",
+      })
+    )?.success,
+    true,
+  );
+
+  // A third peer's token is different (and it never saw the owner's), so the
+  // live receiver keeps the slot even though no transfer has started yet.
+  const refused = await emitAck(intruder, "join-session", {
+    sessionId,
+    receiverToken: "tab-token-intruder-1",
+  });
+  assert.equal(refused?.success, false);
+  assert.match(refused?.message ?? "", /full/i);
+  assert.equal(
+    await redis.hGet(`session:${sessionId}`, "connectedPeer"),
+    receiver.id,
+  );
+
+  sender.disconnect();
+  receiver.disconnect();
+  intruder.disconnect();
+});
+
+test("M1: a live receiver cannot be replaced once the transfer starts", async () => {
+  const sender = await pool.connect();
+  const receiver = await pool.connect();
+  const sessionId = await createSession(sender);
+  const receiverToken = "tab-token-in-flight-1";
+
+  assert.equal(
+    (await emitAck(receiver, "join-session", { sessionId, receiverToken }))
+      ?.success,
+    true,
+  );
+
+  receiver.emit("transfer-start", { sessionId });
+  await eventually(
+    async () =>
+      (await redis.hGet(`session:${sessionId}`, "status")) === "transferring",
+    "the session was not marked as transferring",
+  );
+
+  // Even the same tab's token may no longer take over while bytes are in
+  // flight: the old page gets its recovery window.
+  const replacement = await pool.connect();
+  const refused = await emitAck(replacement, "join-session", {
+    sessionId,
+    receiverToken,
+  });
+  assert.equal(refused?.success, false, "an active transfer lost its slot");
+  assert.match(refused?.message ?? "", /full/i);
+  assert.equal(
+    await redis.hGet(`session:${sessionId}`, "connectedPeer"),
+    receiver.id,
+  );
+
+  sender.disconnect();
+  receiver.disconnect();
+  replacement.disconnect();
+});
+
 // --------------------------------------------------------------------- M2
 
 test("M2: the receiver cannot overwrite the sender's file details", async () => {

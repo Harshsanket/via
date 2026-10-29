@@ -44,6 +44,8 @@ describe('file names', () => {
       '_Hello_World_.txt',
     )
     expect(sanitizeFileName('a\u0000b\u007fc')).toBe('a_b_c')
+    // A bidi override could otherwise disguise the real extension.
+    expect(sanitizeFileName('invoice\u202Etxt.exe')).toBe('invoice_txt.exe')
     expect(sanitizeFileName('')).toBe('download')
   })
 

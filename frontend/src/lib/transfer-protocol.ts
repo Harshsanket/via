@@ -1,5 +1,3 @@
-import { MAX_FILE_SIZE } from './constants'
-
 const MAX_WIRE_FILE_NAME_LENGTH = 255
 
 export interface MetadataFrame {
@@ -29,6 +27,11 @@ export interface RequestTransferFrame {
   type: 'request-transfer'
 }
 
+/** Sender → receiver: the sender is ready and waiting for an accept. */
+export interface OfferTransferFrame {
+  type: 'offer-transfer'
+}
+
 export interface RetryFrame {
   type: 'retry'
 }
@@ -55,6 +58,7 @@ export type ControlFrame =
   | ResumeFrame
   | ResumeRequestFrame
   | RequestTransferFrame
+  | OfferTransferFrame
   | RetryFrame
   | CancelFrame
   | AuthFrame
@@ -66,7 +70,7 @@ const isUnsigned32 = (value: number): boolean =>
   Number.isInteger(value) && value >= 0 && value <= 0xffffffff
 
 const isFileSize = (value: number): boolean =>
-  Number.isInteger(value) && value > 0 && value <= MAX_FILE_SIZE
+  Number.isSafeInteger(value) && value > 0
 
 export function parseControlFrame(value: unknown): ControlFrame | null {
   if (!isRecord(value) || typeof value.type !== 'string') return null
@@ -115,7 +119,6 @@ export function parseControlFrame(value: unknown): ControlFrame | null {
         typeof value.receivedBytes !== 'number' ||
         !Number.isInteger(value.receivedBytes) ||
         value.receivedBytes < 0 ||
-        value.receivedBytes > MAX_FILE_SIZE ||
         typeof value.crcState !== 'number' ||
         !isUnsigned32(value.crcState)
       ) {
@@ -134,6 +137,9 @@ export function parseControlFrame(value: unknown): ControlFrame | null {
 
     case 'request-transfer':
       return { type: 'request-transfer' }
+
+    case 'offer-transfer':
+      return { type: 'offer-transfer' }
 
     case 'retry':
       return { type: 'retry' }

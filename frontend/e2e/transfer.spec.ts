@@ -1,16 +1,66 @@
-import { readFile } from 'node:fs/promises'
-
 import { expect, test, type BrowserContext, type Page } from '@playwright/test'
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
 
-async function forceFallbackDownload(context: BrowserContext) {
+/**
+ * Browser tests cannot drive the real save dialog, so this records what the
+ * app writes into the chosen file. Each `showSaveFilePicker` call starts a new
+ * buffer; `close` commits it and `abort` discards it.
+ */
+async function installDirectSaveMock(context: BrowserContext) {
   await context.addInitScript(() => {
+    const target = window as unknown as {
+      __savedFiles: number[][]
+      showSaveFilePicker: unknown
+    }
+    target.__savedFiles = []
+
+    try {
+      Object.defineProperty(navigator.storage, 'estimate', {
+        configurable: true,
+        value: async () => ({ quota: 2 ** 40, usage: 0 }),
+      })
+    } catch {
+      // The browser may not expose navigator.storage; the app allows it then.
+    }
+
     Object.defineProperty(window, 'showSaveFilePicker', {
       configurable: true,
-      value: undefined,
+      value: async () => {
+        let chunks: Uint8Array[] = []
+        return {
+          createWritable: async () => ({
+            write: async (chunk: ArrayBuffer) => {
+              chunks.push(new Uint8Array(chunk))
+            },
+            close: async () => {
+              const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
+              const merged = new Uint8Array(total)
+              let offset = 0
+              for (const chunk of chunks) {
+                merged.set(chunk, offset)
+                offset += chunk.length
+              }
+              target.__savedFiles.push(Array.from(merged))
+            },
+            abort: async () => {
+              chunks = []
+            },
+          }),
+        }
+      },
     })
   })
+}
+
+async function readSavedFile(page: Page): Promise<Buffer> {
+  const bytes = await page.evaluate(
+    () =>
+      (
+        window as unknown as { __savedFiles: number[][] }
+      ).__savedFiles.at(-1) ?? [],
+  )
+  return Buffer.from(bytes)
 }
 
 async function createSendLink(page: Page, name: string, buffer: Buffer) {
@@ -46,11 +96,17 @@ async function openReceiver(
   return receiver
 }
 
+async function downloadFile(receiver: Page) {
+  const download = receiver.getByRole('button', { name: 'Download' })
+  await expect(download).toBeVisible({ timeout: 20_000 })
+  await download.click()
+}
+
 test('receiver download starts the sender and saves the verified file', async ({
   page,
   context,
 }) => {
-  await forceFallbackDownload(context)
+  await installDirectSaveMock(context)
 
   const payload = Buffer.alloc(2 * 1024 * 1024)
   for (let index = 0; index < payload.length; index += 1) {
@@ -61,47 +117,49 @@ test('receiver download starts the sender and saves the verified file', async ({
   const receiver = await openReceiver(context, receiveUrl, 'via-e2e.bin')
 
   await expect(receiver.getByText(/unauthorized/i)).toHaveCount(0)
-  await expect(receiver.getByRole('button', { name: 'Download' })).toBeVisible()
-
-  const downloadPromise = receiver.waitForEvent('download')
-  await receiver.getByRole('button', { name: 'Download' }).click()
-
-  const download = await downloadPromise
-  const downloadPath = await download.path()
-  expect(downloadPath).not.toBeNull()
-
-  const downloaded = await readFile(downloadPath as string)
-  expect(downloaded.equals(payload)).toBe(true)
+  await downloadFile(receiver)
 
   await expect(
-    page.getByText('Complete — the receiver verified the file'),
+    receiver.getByText('Saved directly to your chosen location'),
+  ).toBeVisible({ timeout: 45_000 })
+  expect((await readSavedFile(receiver)).equals(payload)).toBe(true)
+
+  await expect(
+    page.getByText('Receiver verified and saved the file'),
   ).toBeVisible({ timeout: 20_000 })
+})
+
+test('refuses to receive when the browser reports too little storage', async ({
+  page,
+  context,
+}) => {
+  await installDirectSaveMock(context)
+  await context.addInitScript(() => {
+    try {
+      Object.defineProperty(navigator.storage, 'estimate', {
+        configurable: true,
+        value: async () => ({ quota: 1024, usage: 1000 }),
+      })
+    } catch {
+      // Ignore; the check below would fail without the mock.
+    }
+  })
+
+  const payload = Buffer.alloc(64 * 1024)
+  const receiveUrl = await createSendLink(page, 'no-room.bin', payload)
+  const receiver = await openReceiver(context, receiveUrl, 'no-room.bin')
+
+  await downloadFile(receiver)
+  await expect(
+    receiver.getByText('There is not enough free storage'),
+  ).toBeVisible()
 })
 
 test('writes directly to the chosen file when the picker is available', async ({
   page,
   context,
 }) => {
-  await context.addInitScript(() => {
-    const target = window as unknown as {
-      __directChunks: Uint8Array[]
-      showSaveFilePicker: unknown
-    }
-    target.__directChunks = []
-
-    Object.defineProperty(window, 'showSaveFilePicker', {
-      configurable: true,
-      value: async () => ({
-        createWritable: async () => ({
-          write: async (chunk: ArrayBuffer) => {
-            target.__directChunks.push(new Uint8Array(chunk))
-          },
-          close: async () => undefined,
-          abort: async () => undefined,
-        }),
-      }),
-    })
-  })
+  await installDirectSaveMock(context)
 
   const payload = Buffer.alloc(64 * 1024)
   for (let index = 0; index < payload.length; index += 1) {
@@ -111,52 +169,26 @@ test('writes directly to the chosen file when the picker is available', async ({
   const receiveUrl = await createSendLink(page, 'direct-save.bin', payload)
   const receiver = await openReceiver(context, receiveUrl, 'direct-save.bin')
 
-  await receiver.getByRole('button', { name: 'Download' }).click()
+  await downloadFile(receiver)
   await expect(
     receiver.getByText('Saved directly to your chosen location'),
   ).toBeVisible({ timeout: 45_000 })
 
-  const saved = await receiver.evaluate(() => {
-    const chunks = (
-      window as unknown as { __directChunks: Uint8Array[] }
-    ).__directChunks
-    const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-    const merged = new Uint8Array(total)
-    let offset = 0
-    for (const chunk of chunks) {
-      merged.set(chunk, offset)
-      offset += chunk.length
-    }
-    return Array.from(merged)
-  })
-
-  expect(Buffer.from(saved).equals(payload)).toBe(true)
+  expect((await readSavedFile(receiver)).equals(payload)).toBe(true)
   await expect(
-    page.getByText('Complete — the receiver verified the file'),
+    page.getByText('Receiver verified and saved the file'),
   ).toBeVisible({ timeout: 20_000 })
 })
 
 test('recovers from a checksum mismatch', async ({ page, context }) => {
-  await forceFallbackDownload(context)
+  await installDirectSaveMock(context)
 
   const payload = Buffer.alloc(1024 * 1024)
   for (let index = 0; index < payload.length; index += 1) {
     payload[index] = (index * 7) % 251
   }
 
-  await page.goto('/send')
-  await page.locator('#send-file-input').setInputFiles({
-    name: 'corrupt-once.bin',
-    mimeType: 'application/octet-stream',
-    buffer: payload,
-  })
-
-  await expect(page.getByRole('button', { name: 'Copy Link' })).toBeVisible({
-    timeout: 20_000,
-  })
-  await page.getByRole('button', { name: 'Copy Link' }).click()
-  await expect(page.getByRole('button', { name: 'Link Copied' })).toBeVisible()
-  const receiveUrl = await page.evaluate(() => navigator.clipboard.readText())
+  const receiveUrl = await createSendLink(page, 'corrupt-once.bin', payload)
 
   await page.evaluate(() => {
     const originalSend = RTCDataChannel.prototype.send
@@ -171,42 +203,30 @@ test('recovers from a checksum mismatch', async ({ page, context }) => {
   })
 
   const receiver = await openReceiver(context, receiveUrl, 'corrupt-once.bin')
-  const downloadPromise = receiver.waitForEvent('download', { timeout: 60_000 })
-  await receiver.getByRole('button', { name: 'Download' }).click()
+  await downloadFile(receiver)
 
   const retryButton = receiver.getByRole('button', { name: 'Retry transfer' })
   await expect(retryButton).toBeVisible({ timeout: 45_000 })
   await retryButton.click()
 
-  const download = await downloadPromise
-  const downloaded = await readFile((await download.path()) as string)
-  expect(downloaded.equals(payload)).toBe(true)
+  await expect(
+    receiver.getByText('Saved directly to your chosen location'),
+  ).toBeVisible({ timeout: 60_000 })
+  expect((await readSavedFile(receiver)).equals(payload)).toBe(true)
 })
 
 test('resumes after the data channel is interrupted', async ({
   page,
   context,
 }) => {
-  await forceFallbackDownload(context)
+  await installDirectSaveMock(context)
 
   const payload = Buffer.alloc(5 * 1024 * 1024)
   for (let index = 0; index < payload.length; index += 1) {
     payload[index] = (index * 13) % 251
   }
 
-  await page.goto('/send')
-  await page.locator('#send-file-input').setInputFiles({
-    name: 'resume.bin',
-    mimeType: 'application/octet-stream',
-    buffer: payload,
-  })
-
-  await expect(page.getByRole('button', { name: 'Copy Link' })).toBeVisible({
-    timeout: 20_000,
-  })
-  await page.getByRole('button', { name: 'Copy Link' }).click()
-  await expect(page.getByRole('button', { name: 'Link Copied' })).toBeVisible()
-  const receiveUrl = await page.evaluate(() => navigator.clipboard.readText())
+  const receiveUrl = await createSendLink(page, 'resume.bin', payload)
 
   await page.evaluate(() => {
     const originalSend = RTCDataChannel.prototype.send
@@ -224,15 +244,15 @@ test('resumes after the data channel is interrupted', async ({
   })
 
   const receiver = await openReceiver(context, receiveUrl, 'resume.bin')
-  const downloadPromise = receiver.waitForEvent('download', { timeout: 60_000 })
-  await receiver.getByRole('button', { name: 'Download' }).click()
-
-  const download = await downloadPromise
-  const downloaded = await readFile((await download.path()) as string)
-  expect(downloaded.equals(payload)).toBe(true)
+  await downloadFile(receiver)
 
   await expect(
-    page.getByText('Complete — the receiver verified the file'),
+    receiver.getByText('Saved directly to your chosen location'),
+  ).toBeVisible({ timeout: 60_000 })
+  expect((await readSavedFile(receiver)).equals(payload)).toBe(true)
+
+  await expect(
+    page.getByText('Receiver verified and saved the file'),
   ).toBeVisible({ timeout: 20_000 })
 })
 
@@ -240,8 +260,6 @@ test('someone with the session id but not the key never gets the file', async ({
   page,
   context,
 }) => {
-  await forceFallbackDownload(context)
-
   const payload = Buffer.from('only for the person holding the link')
   const receiveUrl = await createSendLink(page, 'private.txt', payload)
 
@@ -276,4 +294,92 @@ test('someone with the session id but not the key never gets the file', async ({
   expect(senderEvents.some((text) => text.includes('peer.verified'))).toBe(false)
   expect(senderEvents.some((text) => text.includes('transfer.started'))).toBe(false)
   expect(downloads).toHaveLength(0)
+})
+
+test('receiver cancel returns to the key entry screen', async ({
+  page,
+  context,
+}) => {
+  const receiveUrl = await createSendLink(
+    page,
+    'cancel-me.bin',
+    Buffer.from('cancel this transfer'),
+  )
+  const receiver = await openReceiver(context, receiveUrl, 'cancel-me.bin')
+
+  const download = receiver.getByRole('button', { name: 'Download' })
+  await expect(download).toBeVisible({ timeout: 20_000 })
+
+  await receiver.getByRole('button', { name: 'Cancel' }).click()
+
+  await expect(receiver.getByText('Enter your session key')).toBeVisible()
+  await expect(receiver.getByText('Something went wrong')).toHaveCount(0)
+})
+
+test('sender cancel returns to the file picker', async ({ page, context }) => {
+  const receiveUrl = await createSendLink(
+    page,
+    'sender-cancel.bin',
+    Buffer.from('cancel from the sender'),
+  )
+  const receiver = await openReceiver(context, receiveUrl, 'sender-cancel.bin')
+
+  await expect(
+    receiver.getByRole('button', { name: 'Download' }),
+  ).toBeVisible({ timeout: 20_000 })
+
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+
+  await expect(
+    page.getByText('Please add a file to begin sharing'),
+  ).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: /Choose a file to send/ }),
+  ).toBeVisible()
+  await expect(page.getByText('Something went wrong')).toHaveCount(0)
+})
+
+test('keeps the sender session when navigating away and back in-app', async ({
+  page,
+}) => {
+  await createSendLink(page, 'retained.txt', Buffer.from('kept in memory'))
+
+  await page.getByRole('link', { name: 'Via home' }).click()
+  await expect(page.getByRole('heading', { name: 'Via.' })).toBeVisible()
+
+  // Client-side navigation back, not a reload: the same socket still owns
+  // the session, so the sender must land on the link page, not the dropzone.
+  await page.getByRole('link', { name: 'Send' }).click()
+
+  await expect(page.getByRole('button', { name: 'Copy Link' })).toBeVisible({
+    timeout: 10_000,
+  })
+  await expect(page.locator('#send-file-input')).toHaveCount(0)
+})
+
+test('falls back to temporary storage when the save picker is unavailable', async ({
+  page,
+  context,
+}) => {
+  await context.addInitScript(() => {
+    Object.defineProperty(window, 'showSaveFilePicker', {
+      configurable: true,
+      value: undefined,
+    })
+  })
+
+  const payload = Buffer.from('kept in temporary storage')
+  const receiveUrl = await createSendLink(page, 'temporary.txt', payload)
+  const receiver = await openReceiver(context, receiveUrl, 'temporary.txt')
+
+  await downloadFile(receiver)
+
+  const saveLink = receiver.getByRole('link', { name: 'Save file' })
+  await expect(saveLink).toBeVisible({ timeout: 45_000 })
+  await expect(saveLink).toHaveAttribute('download', 'temporary.txt')
+
+  const downloadPromise = receiver.waitForEvent('download')
+  await saveLink.click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe('temporary.txt')
 })

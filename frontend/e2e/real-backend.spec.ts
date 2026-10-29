@@ -1,5 +1,3 @@
-import { readFile } from 'node:fs/promises'
-
 import { expect, test } from '@playwright/test'
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
@@ -13,9 +11,46 @@ test('sends a file through the real signaling backend', async ({
   context,
 }) => {
   await context.addInitScript(() => {
+    const target = window as unknown as {
+      __savedFiles: number[][]
+      showSaveFilePicker: unknown
+    }
+    target.__savedFiles = []
+
+    try {
+      Object.defineProperty(navigator.storage, 'estimate', {
+        configurable: true,
+        value: async () => ({ quota: 2 ** 40, usage: 0 }),
+      })
+    } catch {
+      // Not available; the app allows the transfer then.
+    }
+
     Object.defineProperty(window, 'showSaveFilePicker', {
       configurable: true,
-      value: undefined,
+      value: async () => {
+        let chunks: Uint8Array[] = []
+        return {
+          createWritable: async () => ({
+            write: async (chunk: ArrayBuffer) => {
+              chunks.push(new Uint8Array(chunk))
+            },
+            close: async () => {
+              const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
+              const merged = new Uint8Array(total)
+              let offset = 0
+              for (const chunk of chunks) {
+                merged.set(chunk, offset)
+                offset += chunk.length
+              }
+              target.__savedFiles.push(Array.from(merged))
+            },
+            abort: async () => {
+              chunks = []
+            },
+          }),
+        }
+      },
     })
   })
 
@@ -45,13 +80,22 @@ test('sends a file through the real signaling backend', async ({
   })
   await expect(receiver.getByText(/unauthorized/i)).toHaveCount(0)
 
-  const downloadPromise = receiver.waitForEvent('download', { timeout: 60_000 })
-  await receiver.getByRole('button', { name: 'Download' }).click()
-  const download = await downloadPromise
-  const downloaded = await readFile((await download.path()) as string)
-  expect(downloaded.equals(payload)).toBe(true)
+  const download = receiver.getByRole('button', { name: 'Download' })
+  await expect(download).toBeVisible({ timeout: 20_000 })
+  await download.click()
+  await expect(
+    receiver.getByText('Saved directly to your chosen location'),
+  ).toBeVisible({ timeout: 60_000 })
+
+  const saved = await receiver.evaluate(
+    () =>
+      (
+        window as unknown as { __savedFiles: number[][] }
+      ).__savedFiles.at(-1) ?? [],
+  )
+  expect(Buffer.from(saved).equals(payload)).toBe(true)
 
   await expect(
-    page.getByText('Complete — the receiver verified the file'),
+    page.getByText('Receiver verified and saved the file'),
   ).toBeVisible({ timeout: 20_000 })
 })

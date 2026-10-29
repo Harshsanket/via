@@ -29,15 +29,27 @@ export const createSession = (
  * Emit "join-session" — backend validates the session, joins the room,
  * refreshes TTL, and acks with { success, metadata }.
  * Also triggers "peer-joined" on the other peer's socket.
+ *
+ * `receiverToken` identifies this tab across a reload, so a refreshed receiver
+ * can reclaim its slot before the transfer starts.
  */
 export const joinSession = (
   socket: Socket,
   sessionId: string,
+  receiverToken: string,
   callback: (response: JoinSessionResponse) => void
 ): void => {
   socket.emit(
     'join-session',
-    { sessionId },
+    { sessionId, receiverToken },
     guardAck(parseJoinSessionResponse, INVALID_RESPONSE, callback),
   )
+}
+
+/**
+ * Emit "transfer-start" — tells the server the receiver accepted, so a later
+ * rejoin cannot replace a receiver whose transfer is already in flight.
+ */
+export const sendTransferStart = (socket: Socket, sessionId: string): void => {
+  socket.emit('transfer-start', { sessionId })
 }

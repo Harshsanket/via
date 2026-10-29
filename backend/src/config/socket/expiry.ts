@@ -24,8 +24,6 @@ export const clearSessionExpiry = (sessionId: string): void => {
   timers.delete(sessionId);
 };
 
-export const activeExpiryTimerCount = (): number => timers.size;
-
 /**
  * Schedules the expiry pushes for a session room.
  *

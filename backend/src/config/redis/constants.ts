@@ -1,7 +1,5 @@
 import { PeerID, RedisSession, SessionStatus } from "./types.js";
 
-export const SESSION_TTL: number = 60 * 10;
-export const REFRESH_SESSION_TTL: number = 60 * 30;
 export const NO_SESSION: string = "NOT_IN_SESSION";
 export const NO_PEER: string = "NO_PEER";
 export const NO_FILE_SELECTED: string = "NOT_SELECTED";
@@ -15,6 +13,9 @@ export const SESSION_FIELDS = {
   createdBy: "createdBy",
   connectedPeer: "connectedPeer",
   connectedPeers: "connectedPeers",
+  // Opaque, per-tab value the receiver keeps across a reload. It lets a
+  // refreshed page prove it is the same receiver instead of a third peer.
+  receiverToken: "receiverToken",
   maxAllowedPeers: "maxAllowedPeers",
   fileName: "fileName",
   mimeType: "mimeType",
@@ -48,6 +49,7 @@ export const createSessionObject = (peerId: PeerID): RedisSession => {
     createdBy: peerId,
     connectedPeer: NO_PEER,
     connectedPeers: "0",
+    receiverToken: "",
     maxAllowedPeers: "1",
     fileName: NO_FILE_SELECTED,
     mimeType: NO_FILE_SELECTED,

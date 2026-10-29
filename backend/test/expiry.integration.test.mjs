@@ -14,8 +14,10 @@ import {
 } from "./socket-test-helpers.mjs";
 
 const PORT = Number(process.env.TEST_EXPIRY_PORT ?? 41732);
-const LIFETIME_SECONDS = 6;
+const LIFETIME_SECONDS = 8;
 const WARNING_SECONDS = 3;
+const SESSION_TTL_SECONDS = 3;
+const REFRESH_SESSION_TTL_SECONDS = 5;
 
 let baseUrl;
 let server;
@@ -26,6 +28,8 @@ before(async () => {
   ({ server, baseUrl, log } = await startTestServer({
     port: PORT,
     env: {
+      SESSION_TTL_SECONDS: String(SESSION_TTL_SECONDS),
+      REFRESH_SESSION_TTL_SECONDS: String(REFRESH_SESSION_TTL_SECONDS),
       SESSION_MAX_LIFETIME_SECONDS: String(LIFETIME_SECONDS),
       SESSION_EXPIRY_WARNING_SECONDS: String(WARNING_SECONDS),
     },
@@ -38,22 +42,29 @@ after(async () => {
   await stopTestServer(server);
 });
 
-test("the granted ttl is capped by the session lifetime", async () => {
+test("session and refresh ttls come from the environment", async () => {
   const sender = await pool.connect();
   const receiver = await pool.connect();
 
   const sessionId = await createSession(sender);
+
+  const initialTtl = waitFor(sender, "session:ttl");
+  sender.emit("get-ttl", { sessionId });
+  const initial = await initialTtl;
+  assert.equal(initial?.exists, true);
+  assert.ok(
+    initial.ttl > 0 && initial.ttl <= SESSION_TTL_SECONDS,
+    `ttl ${initial.ttl} should be capped at ${SESSION_TTL_SECONDS}`,
+  );
+
   await emitAck(receiver, "join-session", { sessionId });
 
-  const ttl = waitFor(sender, "session:ttl");
+  const refreshedTtl = waitFor(sender, "session:ttl");
   sender.emit("get-ttl", { sessionId });
-  const payload = await ttl;
-
-  assert.equal(payload?.exists, true);
-  assert.ok(payload.ttl > 0, `ttl should be positive, got ${payload.ttl}`);
+  const refreshed = await refreshedTtl;
   assert.ok(
-    payload.ttl <= LIFETIME_SECONDS,
-    `ttl ${payload.ttl} should be capped at ${LIFETIME_SECONDS}`,
+    refreshed.ttl > 0 && refreshed.ttl <= REFRESH_SESSION_TTL_SECONDS,
+    `ttl ${refreshed.ttl} should be capped at ${REFRESH_SESSION_TTL_SECONDS}`,
   );
 
   sender.disconnect();

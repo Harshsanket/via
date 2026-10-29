@@ -82,12 +82,6 @@ export interface TransferErrorEvent {
   success: true
 }
 
-// ─── Generic Error ────────────────────────────────────────────────────────────
-
-export interface ErrorEvent {
-  message: string
-}
-
 // ─── Logging (UI only) ───────────────────────────────────────────────────────
 
 export type LogStatus = 'error' | 'success' | 'connecting' | 'info'

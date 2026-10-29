@@ -36,6 +36,18 @@ describe('server event parsers', () => {
     }
   })
 
+  it('accepts metadata above the old 50 GB limit', () => {
+    const metadata = {
+      fileName: 'huge.bin',
+      mimeType: 'application/octet-stream',
+      fileSize: 50 * 1024 ** 3 + 1,
+    }
+    expect(parseFileMetadataEvent({ success: true, metadata })).toEqual({
+      success: true,
+      metadata,
+    })
+  })
+
   it('checks join responses, including their metadata', () => {
     expect(parseJoinSessionResponse({ success: false, message: 'full' })).toEqual({
       success: false,

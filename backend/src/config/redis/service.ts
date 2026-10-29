@@ -10,9 +10,8 @@ import type {
 } from "./types.js";
 import { SessionStatus } from "./types.js";
 import {
-  SESSION_TTL,
-  REFRESH_SESSION_TTL,
   NO_SESSION,
+  NO_PEER,
   NO_FILE_SELECTED,
   SESSION_FIELDS,
   createSessionObject,
@@ -62,7 +61,7 @@ export const registerPeer = async (peerId: PeerID): Promise<void> => {
     // NX: never overwrite a live mapping. A recovered connection keeps its
     // socket id, and resetting the key here orphaned the peer's session.
     await redisClient.set(peerStorageKey(peerId), NO_SESSION, {
-      EX: SESSION_TTL,
+      EX: env.sessionTtlSeconds,
       NX: true,
     });
     logRedis("success", "registerPeer", "REGISTERED NEW PEER", peerId);
@@ -104,10 +103,13 @@ export const createSession = async ({
     throw new ApiError(429, "too many active sessions");
   }
 
-  const sessionTtl = Math.max(1, Math.min(SESSION_TTL, remainingLifetime()));
+  const sessionTtl = Math.max(
+    1,
+    Math.min(env.sessionTtlSeconds, remainingLifetime()),
+  );
   const peerTtl = Math.max(
     1,
-    Math.min(REFRESH_SESSION_TTL, remainingLifetime()),
+    Math.min(env.refreshSessionTtlSeconds, remainingLifetime()),
   );
 
   try {
@@ -135,15 +137,54 @@ export const createSession = async ({
   }
 };
 
+/**
+ * What the session records about its receiver slot. The socket layer uses it
+ * to tell a live member from a stale one, and a reloaded page from a third
+ * peer.
+ */
+export const getReceiverSlot = async (
+  sessionId: SessionID,
+): Promise<{
+  peerId: string | null;
+  status: SessionStatus | null;
+  token: string | null;
+}> => {
+  assertValidStrings([sessionId], "getReceiverSlot");
+
+  const [peerId, status, token] = await redisClient.hmGet(
+    sessionStorageKey(sessionId),
+    [F.connectedPeer, F.status, F.receiverToken],
+  );
+
+  return {
+    peerId: peerId && peerId !== NO_PEER ? peerId : null,
+    status:
+      status && Object.values(SessionStatus).includes(status as SessionStatus)
+        ? (status as SessionStatus)
+        : null,
+    token: token || null,
+  };
+};
+
 // join session - [socket] session.ts -> [handleSessions] -> [join-session]
 /**
  * Atomic: existence, limit, idempotent rejoin, membership and TTLs are applied
  * inside one Lua script, so it also returns the session's granted TTL.
+ *
+ * `replaceablePeerId` is a member the new peer may replace: its socket is gone,
+ * or the same receiver reloaded the page before the transfer started. It is
+ * replaced instead of counting against the limit, so a refreshed page can
+ * rejoin at once rather than waiting for the deferred disconnect cleanup.
  */
 export const joinSession = async ({
   sessionId,
   peerId,
-}: SessionParams): Promise<{ connectedPeers: number; ttlSeconds: number }> => {
+  replaceablePeerId,
+  receiverToken,
+}: SessionParams & {
+  replaceablePeerId?: string;
+  receiverToken?: string;
+}): Promise<{ connectedPeers: number; ttlSeconds: number }> => {
   assertValidStrings([sessionId, peerId], "joinSession");
 
   let result: JoinSessionResult;
@@ -151,7 +192,9 @@ export const joinSession = async ({
     result = await runJoinSessionScript({
       sessionId,
       peerId,
-      desiredTtlSeconds: REFRESH_SESSION_TTL,
+      replaceablePeerId,
+      receiverToken,
+      desiredTtlSeconds: env.refreshSessionTtlSeconds,
       maxLifetimeSeconds: remainingLifetime(),
     });
   } catch (error) {
@@ -161,6 +204,13 @@ export const joinSession = async ({
 
   switch (result.status) {
     case "ok":
+      if (replaceablePeerId) {
+        logRedis("warn", "joinSession", "REPLACED PREVIOUS MEMBER", {
+          SESSION: sessionId,
+          PREVIOUS_PEER: replaceablePeerId,
+          PEER: peerId,
+        });
+      }
       logRedis("success", "joinSession", "PEER JOINED SESSION", {
         SESSION: sessionId,
         PEERS: result.connectedPeers,
@@ -323,7 +373,11 @@ const assertGuardedWrite = (
   throw new ApiError(403, messages.forbidden);
 };
 
-// supported way to learn about expiry.
+/**
+ * Reads a session's remaining lifetime. A session that is already gone is
+ * reported as `{ exists: false }`, not as an authorization failure, so a
+ * client that polls after expiry gets a clean answer instead of a 403.
+ */
 export const getSessionTTL = async (
   sessionId: SessionID,
   peerId: PeerID,
@@ -339,15 +393,15 @@ export const getSessionTTL = async (
     redisClient.ttl(sessionStorageKey(sessionId)),
   ]);
 
+  if (ttl === -2 || !createdAt) {
+    logRedis("error", "getSessionTTL", "SESSION NOT FOUND", sessionId);
+    return { exists: false, createdAt: null, ttl: null };
+  }
+
   const isValidPeer = peerId === connectedPeer || peerId === createdBy;
   if (!isValidPeer) {
     logRedis("error", "getSessionTTL", "INVALID PEER", peerId);
     throw new ApiError(403, "invalid request");
-  }
-
-  if (ttl === -2 || !createdAt) {
-    logRedis("error", "getSessionTTL", "SESSION NOT FOUND", sessionId);
-    return { exists: false, createdAt: null, ttl: null };
   }
 
   logRedis("success", "getSessionTTL", "FETCHING TTL", {
@@ -366,6 +420,7 @@ export const getSessionTTL = async (
 export const changeTransferStatus = async (
   sessionId: SessionID,
   status: SessionStatus,
+  requiredPeerId?: PeerID,
 ): Promise<void> => {
   assertValidStrings([sessionId], "changeTransferStatus");
 
@@ -374,6 +429,7 @@ export const changeTransferStatus = async (
     result = await runSetStatusScript({
       sessionId,
       status: status.toLowerCase(),
+      requiredPeerId,
     });
   } catch (error) {
     logRedis(
@@ -402,15 +458,21 @@ export const changeTransferStatus = async (
 export const completeTransfer = async (
   sessionId: SessionID,
   peerId: PeerID,
-): Promise<string> => {
+): Promise<{ fileName: string; ttlSeconds: number }> => {
   assertValidStrings([sessionId, peerId], "completeTransfer");
 
-  let result: { status: GuardedWriteStatus; fileName: string };
+  let result: {
+    status: GuardedWriteStatus;
+    fileName: string;
+    ttlSeconds: number;
+  };
   try {
     result = await runCompleteTransferScript({
       sessionId,
       peerId,
       status: SessionStatus.COMPLETED,
+      completedTtlSeconds: env.completedSessionTtlSeconds,
+      maxLifetimeSeconds: env.sessionMaxLifetimeSeconds,
     });
   } catch (error) {
     logRedis(
@@ -427,7 +489,7 @@ export const completeTransfer = async (
   });
 
   logRedis("success", "completeTransfer", "TRANSFER CONFIRMED", sessionId);
-  return result.fileName;
+  return { fileName: result.fileName, ttlSeconds: result.ttlSeconds };
 };
 
 // cleanup session - [socket] - index -> [initsocket] -> [disconnect]

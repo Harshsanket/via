@@ -10,3 +10,10 @@
 
 	reverse_proxy web:8080
 }
+
+# Plain HTTP from any host, including the LAN IP, lands on the trusted name.
+# https://<ip> cannot be covered by a public certificate, so avoid handing it
+# to the browser at all.
+http://:80 {
+	redir https://{$VIA_HOST}{uri} permanent
+}

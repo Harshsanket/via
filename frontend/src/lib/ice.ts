@@ -10,14 +10,7 @@ interface IceServersApiResponse {
 
 export interface IceConfig {
   servers: RTCIceServer[]
-  turnAvailable: boolean
 }
-
-const hasTurnServer = (servers: RTCIceServer[]): boolean =>
-  servers.some((server) => {
-    const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
-    return urls.some((url) => url.startsWith('turn:') || url.startsWith('turns:'))
-  })
 
 const isIceServer = (value: unknown): value is RTCIceServer => {
   if (!value || typeof value !== 'object') return false
@@ -64,7 +57,7 @@ export async function fetchIceServers(
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<IceConfig> {
-  if (!sessionId) return { servers: DEFAULT_STUN_SERVERS, turnAvailable: false }
+  if (!sessionId) return { servers: DEFAULT_STUN_SERVERS }
 
   const { signal: timeoutSignal, cleanup } = withTimeout(signal, 5_000)
 
@@ -79,25 +72,32 @@ export async function fetchIceServers(
       },
     )
 
+    // 503 means the deployment deliberately has no relay (the LAN-only case).
+    // Direct host candidates are enough there, and skipping the public STUN
+    // fallback keeps the browser from contacting an outside server for no gain.
+    if (response.status === 503) {
+      return { servers: [] }
+    }
+
     if (!response.ok) {
-      return { servers: DEFAULT_STUN_SERVERS, turnAvailable: false }
+      return { servers: DEFAULT_STUN_SERVERS }
     }
 
     const body = (await response.json()) as IceServersApiResponse
     const servers = body.data?.iceServers
 
     if (!Array.isArray(servers)) {
-      return { servers: DEFAULT_STUN_SERVERS, turnAvailable: false }
+      return { servers: DEFAULT_STUN_SERVERS }
     }
 
     const valid = servers.filter(isIceServer)
     if (valid.length === 0) {
-      return { servers: DEFAULT_STUN_SERVERS, turnAvailable: false }
+      return { servers: DEFAULT_STUN_SERVERS }
     }
 
-    return { servers: valid, turnAvailable: hasTurnServer(valid) }
+    return { servers: valid }
   } catch {
-    return { servers: DEFAULT_STUN_SERVERS, turnAvailable: false }
+    return { servers: DEFAULT_STUN_SERVERS }
   } finally {
     cleanup()
   }

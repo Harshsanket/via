@@ -1,3 +1,4 @@
+import { env } from "../env.js";
 import { cleanupOnDisconnect, registerPeer } from "../redis/service.js";
 import { handleWebRTC } from "../webrtc/index.js";
 import { clearSessionExpiry, initSessionExpiry } from "./expiry.js";
@@ -16,7 +17,7 @@ import { logSocket, registerSafeListener } from "./utils.js";
  * How long a dropped connection may come back as the same socket (Socket.IO
  * connection state recovery). Shared with the server options in server.ts.
  */
-export const RECOVERY_WINDOW_MS = 2 * 60 * 1000;
+export const RECOVERY_WINDOW_MS = env.recoveryWindowSeconds * 1000;
 
 /**
  * Disconnect reasons Socket.IO can recover from. Socket.IO still fires

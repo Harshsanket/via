@@ -2,6 +2,7 @@ import { lazy, Suspense, type ReactNode } from 'react'
 import { Route, Routes } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 
+import AuroraBackground from './components/AuroraBackground'
 import ConnectionBanner from './components/ConnectionBanner'
 import Footer from './components/Footer'
 import Header from './components/Header'
@@ -31,7 +32,8 @@ function RouteFallback() {
 
 function Layout({ children }: { children: ReactNode }) {
   return (
-    <div className="flex min-h-dvh w-full flex-col bg-background text-foreground">
+    <div className="relative isolate flex min-h-dvh w-full flex-col bg-transparent text-foreground">
+      <AuroraBackground />
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-primary-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
@@ -42,7 +44,7 @@ function Layout({ children }: { children: ReactNode }) {
       {socketConfigError && (
         <div
           role="alert"
-          className="mx-4 mt-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-900 sm:mx-6"
+          className="mx-4 mt-2 rounded-lg border border-amber-400/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-100 sm:mx-6"
         >
           {socketConfigError}
         </div>
@@ -51,7 +53,7 @@ function Layout({ children }: { children: ReactNode }) {
       <main
         id="main-content"
         tabIndex={-1}
-        className="flex w-full flex-1 flex-col items-center px-4 py-6 focus:outline-none sm:px-6"
+        className="flex w-full flex-1 flex-col items-center px-4 pb-28 pt-6 focus:outline-none sm:px-6 sm:pb-20"
       >
         {children}
       </main>

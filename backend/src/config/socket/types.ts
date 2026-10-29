@@ -23,7 +23,14 @@ export interface SessionIdPayload {
   sessionId: string;
 }
 
-export type JoinSessionPayload = SessionIdPayload;
+export type JoinSessionPayload = SessionIdPayload & {
+  /**
+   * Per-tab identity the receiver keeps in sessionStorage. A reloaded page
+   * sends the same token, so it can reclaim its own slot before the transfer
+   * starts; a third peer's token does not match and is still refused.
+   */
+  receiverToken?: string;
+};
 
 export interface StoreFileMetadataPayload {
   sessionId: string;
@@ -85,6 +92,7 @@ export interface ClientToServerEvents {
   "get-ttl": (payload: SessionIdPayload) => void;
   "store-file-metadata": (payload: StoreFileMetadataPayload) => void;
   "get-file-metadata": (payload: GetFileMetadataPayload) => void;
+  "transfer-start": (payload: SessionIdPayload) => void;
   "transfer-complete": (
     payload: TransferCompletePayload,
     ack?: Ack<TransferResponse>,

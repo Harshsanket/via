@@ -8,6 +8,8 @@ const SAMPLE_SESSION_ID = "00000000-0000-4000-8000-000000000000";
 
 process.env.REDIS_URL = "redis://localhost:6379";
 process.env.LOG_LEVEL = "silent";
+// Never read a developer's backend/.env while checking defaults.
+process.env.NODE_ENV = "test";
 
 const root = process.cwd();
 const load = (rel) => import(pathToFileURL(path.join(root, rel)).href);
@@ -83,26 +85,29 @@ check("ice candidate: null allowed, number rejected", () => {
   );
 });
 
-check("file metadata: >50GiB rejected, valid accepted", () => {
-  assert.throws(
-    () =>
-      utils.parseStoreFileMetadataPayload({
-        sessionId: SAMPLE_SESSION_ID,
-        fileName: "a",
-        mimeType: "text/plain",
-        fileSize: utils.MAX_FILE_SIZE + 1,
-      }),
-    utils.InvalidPayloadError,
-  );
+check("file metadata: no fixed size cap, invalid sizes rejected", () => {
+  const huge = 50 * 1024 ** 3 + 1;
   assert.equal(
     utils.parseStoreFileMetadataPayload({
       sessionId: SAMPLE_SESSION_ID,
       fileName: "a",
       mimeType: "text/plain",
-      fileSize: 10,
+      fileSize: huge,
     }).fileSize,
-    10,
+    huge,
   );
+  for (const fileSize of [0, -1, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () =>
+        utils.parseStoreFileMetadataPayload({
+          sessionId: SAMPLE_SESSION_ID,
+          fileName: "a",
+          mimeType: "text/plain",
+          fileSize,
+        }),
+      utils.InvalidPayloadError,
+    );
+  }
 });
 
 check("offer without an sdp is rejected", () => {

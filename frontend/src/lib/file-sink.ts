@@ -1,122 +1,119 @@
 import { sanitizeFileName, sanitizeMimeType } from './format'
 
-export type SinkMode = 'opfs' | 'memory' | 'direct'
+export type SinkMode = 'direct' | 'temporary'
 
 export interface FinishedFile {
-  url: string | null
   name: string
   mode: SinkMode
+  /**
+   * For temporary sinks: an object URL the UI can offer as a download.
+   * Direct sinks write to the user's file and have no URL.
+   */
+  downloadUrl?: string
   cleanup: () => void
 }
 
 export interface IncomingFileSinkOptions {
-  /** When set, chunks are written directly to this user-chosen file. */
+  /**
+   * The user-chosen file to stream into. Omit it in browsers without the File
+   * System Access API; the sink then stores the file temporarily instead.
+   */
   destination?: FileSystemFileHandle
 }
 
-export class FileTooLargeError extends Error {
-  constructor() {
-    super(
-      'This browser cannot stream the file to disk, and the file is too large to buffer in memory. Use a Chromium-based browser or a smaller file.',
-    )
-    this.name = 'FileTooLargeError'
-  }
-}
+const TEMP_PREFIX = 'via-incoming-'
 
-const OPFS_DIRECTORY = 'via-transfers'
-const STALE_TRANSFER_AGE_MS = 24 * 60 * 60 * 1000
+/**
+ * Safe ceiling for the in-memory fallback. Without OPFS the whole file is
+ * held in an ArrayBuffer list, so an unbounded file can crash the tab.
+ */
+export const MEMORY_FALLBACK_MAX_FILE_SIZE = 512 * 1024 * 1024
 
-type SweepableDirectory = Pick<FileSystemDirectoryHandle, 'removeEntry'> & {
-  entries(): AsyncIterable<
-    readonly [string, { kind: string; getFile?: () => Promise<{ lastModified: number }> }]
-  >
+/** True when the browser can persist a temporary file instead of buffering it. */
+export const isOpfsAvailable = (): boolean =>
+  typeof navigator !== 'undefined' &&
+  typeof navigator.storage?.getDirectory === 'function'
+
+const STALE_TEMP_AGE_MS = 24 * 60 * 60 * 1000
+
+/** `entries()` is implemented by browsers but missing from the DOM typings. */
+type OpfsDirectory = Pick<FileSystemDirectoryHandle, 'removeEntry'> & {
+  entries(): AsyncIterable<readonly [string, FileSystemHandle]>
 }
 
 /**
- * Deletes partial downloads (`*.part`) left in OPFS by a tab that crashed or
- * was closed mid-transfer; nothing else would ever remove them. Only files
- * untouched for a day go, so another tab's transfer in progress is safe.
- * Returns how many were removed.
+ * Deletes partial downloads left in OPFS by a tab that crashed or was closed
+ * mid-transfer; nothing else would ever remove them. Only files untouched for
+ * a day go, so another tab's transfer in progress is safe.
  */
-export async function sweepStaleTransfers(
-  directory?: FileSystemDirectoryHandle,
-  maxAgeMs = STALE_TRANSFER_AGE_MS,
+export async function sweepStaleTempFiles(
+  maxAgeMs = STALE_TEMP_AGE_MS,
   now = Date.now(),
 ): Promise<number> {
-  let target = directory as SweepableDirectory | undefined
-  if (!target) {
-    if (!isOpfsSupported()) return 0
-    try {
-      const root = await navigator.storage.getDirectory()
-      target = (await root.getDirectoryHandle(OPFS_DIRECTORY, {
-        create: false,
-      })) as unknown as SweepableDirectory
-    } catch {
-      return 0
-    }
-  }
+  if (!isOpfsAvailable()) return 0
 
-  let removed = 0
-  for await (const [name, handle] of target.entries()) {
-    if (handle.kind !== 'file' || !name.endsWith('.part') || !handle.getFile) continue
-    try {
-      const file = await handle.getFile()
-      if (now - file.lastModified < maxAgeMs) continue
-      await target.removeEntry(name)
-      removed += 1
-    } catch {
-      // In use or already gone; try again next time.
-    }
-  }
-  return removed
-}
+  try {
+    const root = (await navigator.storage.getDirectory()) as unknown as OpfsDirectory
+    let removed = 0
 
-export function isOpfsSupported(): boolean {
-  if (typeof navigator === 'undefined') return false
-  if (!('storage' in navigator) || typeof navigator.storage.getDirectory !== 'function') {
-    return false
+    for await (const [name, handle] of root.entries()) {
+      if (
+        handle.kind !== 'file' ||
+        !name.startsWith(TEMP_PREFIX) ||
+        !name.endsWith('.part')
+      ) {
+        continue
+      }
+
+      try {
+        const file = await (handle as FileSystemFileHandle).getFile()
+        if (now - file.lastModified < maxAgeMs) continue
+        await root.removeEntry(name)
+        removed += 1
+      } catch {
+        // In use or already gone; try again next time.
+      }
+    }
+
+    return removed
+  } catch {
+    return 0
   }
-  if (typeof FileSystemFileHandle === 'undefined') return false
-  return 'createWritable' in FileSystemFileHandle.prototype
 }
 
 /**
- * Receives chunks either into the Origin Private File System (streaming,
- * survives large files) or, when OPFS is unavailable, into memory.
- *
- * Writes are serialized through a promise chain so the caller can hand chunks
- * over synchronously while the sink is still being initialized.
+ * Streams received chunks into a file. When the browser supports the save
+ * picker, chunks go straight to the file the receiver chose, so there is no
+ * second copy. Browsers without it (Safari, Firefox) keep the file in the
+ * Origin Private File System, or in memory as a last resort, and the finished
+ * file is offered as a download.
  */
 export class IncomingFileSink {
-  private mode: SinkMode = 'memory'
+  private writable: FileSystemWritableFileStream | null = null
+  private tempHandle: FileSystemFileHandle | null = null
+  private memoryChunks: ArrayBuffer[] | null = null
+  private downloadUrl: string | null = null
   private initPromise: Promise<void> | null = null
   private queue: Promise<void> = Promise.resolve()
-  private chunks: ArrayBuffer[] = []
-  private writable: FileSystemWritableFileStream | null = null
-  private fileHandle: FileSystemFileHandle | null = null
-  private directory: FileSystemDirectoryHandle | null = null
-  private opfsFileName = ''
-  private objectUrl: string | null = null
   private closed = false
   private finished = false
   private readonly fileName: string
   private readonly mimeType: string
   private readonly expectedSize: number
-  private readonly maxMemoryBytes: number
   private readonly destination: FileSystemFileHandle | null
+  private readonly mode: SinkMode
 
   constructor(
     fileName: string,
     mimeType: string,
     expectedSize: number,
-    maxMemoryBytes: number,
-    options: IncomingFileSinkOptions = {},
+    options: IncomingFileSinkOptions,
   ) {
     this.fileName = fileName
-    this.mimeType = mimeType
+    this.mimeType = sanitizeMimeType(mimeType)
     this.expectedSize = expectedSize
-    this.maxMemoryBytes = maxMemoryBytes
     this.destination = options.destination ?? null
+    this.mode = this.destination ? 'direct' : 'temporary'
   }
 
   get sinkMode(): SinkMode {
@@ -127,38 +124,34 @@ export class IncomingFileSink {
     if (this.destination) {
       try {
         this.writable = await this.destination.createWritable()
-        this.mode = 'direct'
-        return
       } catch {
         throw new Error('Could not open the selected file for writing.')
       }
-    }
-
-    if (!isOpfsSupported()) {
-      if (this.expectedSize > this.maxMemoryBytes) throw new FileTooLargeError()
-      this.mode = 'memory'
       return
     }
 
-    try {
-      const root = await navigator.storage.getDirectory()
-      const directory = await root.getDirectoryHandle(OPFS_DIRECTORY, {
-        create: true,
-      })
-      const opfsFileName = `${crypto.randomUUID()}.part`
-      const fileHandle = await directory.getFileHandle(opfsFileName, {
-        create: true,
-      })
-      const writable = await fileHandle.createWritable()
+    const storage = typeof navigator === 'undefined' ? undefined : navigator.storage
 
-      this.directory = directory
-      this.opfsFileName = opfsFileName
-      this.fileHandle = fileHandle
-      this.writable = writable
-      this.mode = 'opfs'
+    try {
+      if (!storage?.getDirectory) throw new Error('No private file system')
+      const root = await storage.getDirectory()
+      this.tempHandle = await root.getFileHandle(
+        `${TEMP_PREFIX}${crypto.randomUUID()}.part`,
+        { create: true },
+      )
+      this.writable = await this.tempHandle.createWritable()
     } catch {
-      this.mode = 'memory'
-      if (this.expectedSize > this.maxMemoryBytes) throw new FileTooLargeError()
+      // Drop the empty handle created above if createWritable was unavailable.
+      await this.removeTemp()
+
+      if (this.expectedSize > MEMORY_FALLBACK_MAX_FILE_SIZE) {
+        throw new Error(
+          'This browser cannot stream the file to disk, and the file is too large to buffer in memory. Use Chrome or Edge, or choose a smaller file.',
+        )
+      }
+      // No OPFS: keep the chunks in memory until the download is offered.
+      this.writable = null
+      this.memoryChunks = []
     }
   }
 
@@ -171,16 +164,13 @@ export class IncomingFileSink {
     if (this.closed) return Promise.reject(new Error('Sink is closed'))
 
     this.queue = this.queue.then(async () => {
+      if (this.closed) throw new Error('Sink is closed')
       await this.ensureInitialized()
-      if (this.mode === 'opfs' && this.writable) {
+      if (this.writable) {
         await this.writable.write(chunk)
-        return
+      } else {
+        this.memoryChunks!.push(chunk)
       }
-      if (this.mode === 'direct' && this.writable) {
-        await this.writable.write(chunk)
-        return
-      }
-      this.chunks.push(chunk)
     })
 
     return this.queue
@@ -194,26 +184,33 @@ export class IncomingFileSink {
     await this.ensureInitialized()
 
     const name = sanitizeFileName(this.fileName)
-    const type = sanitizeMimeType(this.mimeType)
 
-    if (this.mode === 'direct' && this.writable) {
+    if (this.writable) {
       await this.writable.close()
-      return { url: null, name, mode: this.mode, cleanup: this.cleanup }
+      this.writable = null
+
+      if (this.tempHandle) {
+        const file = await this.tempHandle.getFile()
+        this.downloadUrl = URL.createObjectURL(
+          new File([file], name, { type: this.mimeType }),
+        )
+      }
+    } else {
+      const blob = new Blob(this.memoryChunks ?? [], { type: this.mimeType })
+      // The Blob now owns the bytes; release the chunk list so a large file is
+      // not kept in memory twice.
+      this.memoryChunks = null
+      this.downloadUrl = URL.createObjectURL(
+        new File([blob], name, { type: this.mimeType }),
+      )
     }
 
-    if (this.mode === 'opfs' && this.writable && this.fileHandle) {
-      await this.writable.close()
-      const file = await this.fileHandle.getFile()
-      const url = URL.createObjectURL(file)
-      this.objectUrl = url
-      return { url, name, mode: this.mode, cleanup: this.cleanup }
+    return {
+      name,
+      mode: this.mode,
+      downloadUrl: this.downloadUrl ?? undefined,
+      cleanup: this.cleanup,
     }
-
-    const blob = new Blob(this.chunks, { type })
-    this.chunks = []
-    const url = URL.createObjectURL(blob)
-    this.objectUrl = url
-    return { url, name, mode: this.mode, cleanup: this.cleanup }
   }
 
   async abort(): Promise<void> {
@@ -226,27 +223,34 @@ export class IncomingFileSink {
       // Initialization may have failed; nothing to close.
     }
 
-    this.writable?.abort().catch(() => undefined)
-    this.chunks = []
-    this.revokeUrl()
-
-    if (this.directory && this.opfsFileName) {
-      await this.directory.removeEntry(this.opfsFileName).catch(() => undefined)
+    if (this.writable) {
+      await this.writable.abort().catch(() => undefined)
+      this.writable = null
     }
+    this.memoryChunks = null
+    await this.removeTemp()
   }
 
   cleanup = (): void => {
     this.closed = true
-    this.revokeUrl()
-    this.chunks = []
-    if (this.directory && this.opfsFileName) {
-      void this.directory.removeEntry(this.opfsFileName).catch(() => undefined)
+    if (this.downloadUrl) {
+      URL.revokeObjectURL(this.downloadUrl)
+      this.downloadUrl = null
     }
+    void this.removeTemp()
   }
 
-  private revokeUrl(): void {
-    if (!this.objectUrl) return
-    URL.revokeObjectURL(this.objectUrl)
-    this.objectUrl = null
+  private async removeTemp(): Promise<void> {
+    const handle = this.tempHandle
+    this.tempHandle = null
+    if (!handle) return
+
+    try {
+      const storage = typeof navigator === 'undefined' ? undefined : navigator.storage
+      const root = await storage?.getDirectory?.()
+      await root?.removeEntry(handle.name)
+    } catch {
+      // Best effort: a stale temporary file is harmless.
+    }
   }
 }

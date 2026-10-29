@@ -4,7 +4,7 @@ import { asyncHandler } from "../utils/async-handler.js";
 import { ApiResponse } from "../utils/api-response.js";
 
 export const healthCheck = asyncHandler(
-  async (req: Request, res: Response): Promise<void> => {
+  async (_req: Request, res: Response): Promise<void> => {
     // Redis is the only hard dependency: every session lives there, so a
     // degraded Redis means the server cannot do its job at all.
     let redis = false;

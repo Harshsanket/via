@@ -36,20 +36,20 @@ export default function TransferProgress({
 
   return (
     <div className={className}>
-      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-sm text-gray-600">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-sm text-muted-foreground">
         <span className="font-light">{paused ? 'Paused' : label}</span>
         <span className="mb-0.5 flex items-baseline gap-3 font-semibold">
           {speedLabel && (
-            <span className="text-xs font-medium text-gray-500">
+            <span className="text-xs font-medium text-muted-foreground">
               {speedLabel}
             </span>
           )}
           {etaLabel && (
-            <span className="text-xs font-medium text-gray-500">
+            <span className="text-xs font-medium text-muted-foreground">
               {etaLabel}
             </span>
           )}
-          <span className={tone === 'emerald' ? 'text-emerald-600' : 'text-indigo-600'}>
+          <span className={tone === 'emerald' ? 'text-emerald-400' : 'text-indigo-400'}>
             {percent}%
           </span>
         </span>
@@ -58,7 +58,7 @@ export default function TransferProgress({
         {Math.floor(percent / 10) * 10} percent
       </span>
       <div
-        className="h-3 w-full overflow-hidden rounded-full bg-gray-200 shadow-inner"
+        className="h-3 w-full overflow-hidden rounded-full bg-white/10 shadow-inner"
         role="progressbar"
         aria-label="Transfer progress"
         aria-valuemin={0}

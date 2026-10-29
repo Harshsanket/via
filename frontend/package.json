@@ -1,9 +1,20 @@
 {
   "name": "via-frontend",
   "private": true,
+  "description": "React frontend for Via, a browser-to-browser file sharing app",
   "license": "GPL-3.0-only",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "author": "Harsh Sanket",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Harshsanket/via.git",
+    "directory": "frontend"
+  },
+  "homepage": "https://github.com/Harshsanket/via#readme",
+  "bugs": {
+    "url": "https://github.com/Harshsanket/via/issues"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

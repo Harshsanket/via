@@ -1,117 +1,105 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import { FileTooLargeError, IncomingFileSink, sweepStaleTransfers } from './file-sink'
+import {
+  IncomingFileSink,
+  MEMORY_FALLBACK_MAX_FILE_SIZE,
+} from './file-sink'
 
 const encode = (value: string): ArrayBuffer =>
   new TextEncoder().encode(value).slice().buffer
 
+const makeDestination = () => {
+  const chunks: string[] = []
+  let closed = false
+  let aborted = false
+
+  const destination = {
+    createWritable: async () => ({
+      write: async (chunk: ArrayBuffer) => {
+        chunks.push(new TextDecoder().decode(chunk))
+      },
+      close: async () => {
+        closed = true
+      },
+      abort: async () => {
+        aborted = true
+      },
+    }),
+  } as unknown as FileSystemFileHandle
+
+  return {
+    destination,
+    chunks,
+    get closed() {
+      return closed
+    },
+    get aborted() {
+      return aborted
+    },
+  }
+}
+
 describe('IncomingFileSink', () => {
-  it('buffers chunks in memory when OPFS is unavailable', async () => {
-    const createObjectURL = vi
-      .spyOn(URL, 'createObjectURL')
-      .mockReturnValue('blob:test')
-    const revokeObjectURL = vi
-      .spyOn(URL, 'revokeObjectURL')
-      .mockImplementation(() => undefined)
-
-    const sink = new IncomingFileSink('hello.txt', 'text/plain', 11, 1024)
-    await sink.write(encode('hello '))
-    await sink.write(encode('world'))
-
-    const finished = await sink.finish()
-
-    expect(finished.mode).toBe('memory')
-    expect(finished.name).toBe('hello.txt')
-    expect(finished.url).toBe('blob:test')
-    expect(sink.sinkMode).toBe('memory')
-    expect(createObjectURL).toHaveBeenCalledTimes(1)
-
-    finished.cleanup()
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:test')
-  })
-
-  it('rejects files larger than the memory fallback', async () => {
-    const sink = new IncomingFileSink('big.bin', 'application/octet-stream', 20, 10)
-
-    await expect(sink.write(new ArrayBuffer(20))).rejects.toBeInstanceOf(
-      FileTooLargeError,
-    )
-    await expect(sink.finish()).rejects.toBeInstanceOf(FileTooLargeError)
-  })
-
-  it('rejects writes after an abort', async () => {
-    const sink = new IncomingFileSink('x.txt', 'text/plain', 3, 1024)
-    await sink.abort()
-
-    await expect(sink.write(encode('abc'))).rejects.toThrow('Sink is closed')
-  })
-
-  it('writes directly to a chosen file without creating an object URL', async () => {
-    const chunks: string[] = []
-    let closed = false
-    const destination = {
-      createWritable: async () => ({
-        write: async (chunk: ArrayBuffer) => {
-          chunks.push(new TextDecoder().decode(chunk))
-        },
-        close: async () => {
-          closed = true
-        },
-        abort: async () => undefined,
-      }),
-    } as unknown as FileSystemFileHandle
-
-    const sink = new IncomingFileSink('direct.txt', 'text/plain', 6, 1024, {
-      destination,
+  it('writes chunks directly to the chosen file', async () => {
+    const target = makeDestination()
+    const sink = new IncomingFileSink('direct.txt', 'text/plain', 6, {
+      destination: target.destination,
     })
+
     await sink.write(encode('abc'))
     await sink.write(encode('def'))
 
     const finished = await sink.finish()
 
     expect(finished.mode).toBe('direct')
-    expect(finished.url).toBeNull()
     expect(finished.name).toBe('direct.txt')
-    expect(chunks.join('')).toBe('abcdef')
-    expect(closed).toBe(true)
+    expect(target.chunks.join('')).toBe('abcdef')
+    expect(target.closed).toBe(true)
+    expect(sink.sinkMode).toBe('direct')
   })
-})
 
-describe('sweepStaleTransfers', () => {
-  const fakeDirectory = (files: Record<string, number>) => {
-    const removed: string[] = []
-    const directory = {
-      async *entries() {
-        for (const [name, lastModified] of Object.entries(files)) {
-          yield [
-            name,
-            { kind: 'file', getFile: async () => ({ lastModified }) },
-          ] as const
-        }
-      },
-      removeEntry: async (name: string) => {
-        removed.push(name)
-      },
-    }
-    return { directory, removed }
-  }
-
-  it('removes only partial files older than the cutoff', async () => {
-    const now = 10 * 24 * 60 * 60 * 1000
-    const day = 24 * 60 * 60 * 1000
-    const { directory, removed } = fakeDirectory({
-      'old.part': now - 2 * day,
-      'fresh.part': now - 60_000,
-      'old-but-not-ours.txt': now - 5 * day,
+  it('aborts the open destination', async () => {
+    const target = makeDestination()
+    const sink = new IncomingFileSink('x.txt', 'text/plain', 3, {
+      destination: target.destination,
     })
 
-    const count = await sweepStaleTransfers(
-      directory as unknown as FileSystemDirectoryHandle,
-      day,
-      now,
+    await sink.abort()
+
+    expect(target.aborted).toBe(true)
+    await expect(sink.write(encode('abc'))).rejects.toThrow('Sink is closed')
+  })
+
+  it('keeps chunks temporarily and offers a download when there is no picker', async () => {
+    // Node has no navigator.storage here, so this exercises the in-memory
+    // fallback; a browser with OPFS uses the same temporary mode on disk.
+    const sink = new IncomingFileSink('temp.txt', 'text/plain', 6, {})
+
+    await sink.write(encode('abc'))
+    await sink.write(encode('def'))
+
+    const finished = await sink.finish()
+
+    expect(finished.mode).toBe('temporary')
+    expect(finished.name).toBe('temp.txt')
+    expect(finished.downloadUrl).toMatch(/^blob:/)
+    expect(await (await fetch(finished.downloadUrl!)).text()).toBe('abcdef')
+    expect(sink.sinkMode).toBe('temporary')
+
+    finished.cleanup()
+  })
+
+  it('refuses to buffer an oversized file when OPFS is unavailable', async () => {
+    // Node has no navigator.storage, so this is the in-memory fallback.
+    const sink = new IncomingFileSink(
+      'huge.bin',
+      'application/octet-stream',
+      MEMORY_FALLBACK_MAX_FILE_SIZE + 1,
+      {},
     )
 
-    expect(removed).toEqual(['old.part'])
-    expect(count).toBe(1)
+    await expect(sink.write(encode('abc'))).rejects.toThrow(
+      /too large to buffer in memory/i,
+    )
   })
 })
