@@ -25,7 +25,6 @@ pids/
 *.pid
 *.seed
 *.pid.lock
-/backend/data/
 
 # Coverage
 coverage/
