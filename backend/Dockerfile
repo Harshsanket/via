@@ -1,5 +1,5 @@
 # Build stage: devDependencies are needed here for tsc.
-FROM node:24-alpine AS build
+FROM node:25-alpine AS build
 
 WORKDIR /app
 
@@ -11,7 +11,7 @@ RUN npm run build && npm prune --omit=dev
 
 # Runtime stage: compiled output and production dependencies only, so the
 # TypeScript sources, tsc and the dev tooling never ship.
-FROM node:24-alpine AS runtime
+FROM node:25-alpine AS runtime
 
 WORKDIR /app
 
