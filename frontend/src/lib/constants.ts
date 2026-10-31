@@ -17,7 +17,13 @@ export const BUFFER_LOW_THRESHOLD = 1 * MB
 
 export const TTL_WARNING_SECONDS = 60
 
+/** Shown when ICE cannot establish a path after the automatic retries. */
+export const DIRECT_CONNECTION_ERROR =
+  'Could not connect directly to the other device. Make sure both devices are on the same Wi-Fi (not a guest network), with client/AP isolation off and any VPN disabled.'
+
 export const MAX_SESSION_ID_LENGTH = 128
+export const MIN_SHORT_CODE_LENGTH = 4
+export const MAX_SHORT_CODE_LENGTH = 6
 export const MAX_FILE_NAME_LENGTH = 180
 
 export const DEFAULT_STUN_SERVERS: RTCIceServer[] = [

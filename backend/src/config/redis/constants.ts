@@ -23,6 +23,9 @@ export const SESSION_FIELDS = {
   status: "status",
   createdAt: "createdAt",
   lastActivity: "lastActivity",
+  // Four-digit alias the sender shares instead of the UUID path. It is not a
+  // secret; the link key stays in the URL fragment.
+  shortCode: "shortCode",
 } as const;
 
 /**
@@ -33,7 +36,11 @@ export const KEY_PREFIXES = {
   session: "session:",
   peer: "peer:",
   peerSessions: "peer-sessions:",
+  short: "short:",
 } as const;
+
+/** Sorted set of active codes, scored by expiry, used to detect a full space. */
+export const SHORT_CODE_ACTIVE_KEY = "short:active";
 
 export const sessionStorageKey = (sessionId: string): string =>
   `${KEY_PREFIXES.session}${sessionId}`;
@@ -41,12 +48,18 @@ export const peerStorageKey = (peerId: string): string =>
   `${KEY_PREFIXES.peer}${peerId}`;
 export const peerSessionCountKey = (peerId: string): string =>
   `${KEY_PREFIXES.peerSessions}${peerId}`;
+export const shortCodeStorageKey = (shortCode: string): string =>
+  `${KEY_PREFIXES.short}${shortCode}`;
 
-export const createSessionObject = (peerId: PeerID): RedisSession => {
+export const createSessionObject = (
+  peerId: PeerID,
+  shortCode: string,
+): RedisSession => {
   const now = Date.now().toString();
 
   return {
     createdBy: peerId,
+    shortCode,
     connectedPeer: NO_PEER,
     connectedPeers: "0",
     receiverToken: "",

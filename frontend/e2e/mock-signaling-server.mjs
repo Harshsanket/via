@@ -6,6 +6,15 @@ const port = Number(process.env.MOCK_PORT ?? 3100)
 const sessionTtlSeconds = 3_600
 
 const sessions = new Map()
+const shortCodes = new Map()
+
+const generateShortCode = () => {
+  for (let attempt = 0; attempt < 10_000; attempt += 1) {
+    const code = String(Math.floor(Math.random() * 10_000)).padStart(4, '0')
+    if (!shortCodes.has(code)) return code
+  }
+  throw new Error('no short codes left')
+}
 
 const httpServer = createServer((request, response) => {
   if (request.url === '/healthz') {
@@ -14,12 +23,23 @@ const httpServer = createServer((request, response) => {
     return
   }
 
+  // Like the real server with no relay configured: 503 tells the client to
+  // use host candidates only instead of falling back to public STUN.
+  if (request.url?.startsWith('/api/v1/ice-servers')) {
+    response.writeHead(503, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': request.headers.origin ?? '*',
+    })
+    response.end(JSON.stringify({ success: false, message: 'no relay' }))
+    return
+  }
+
   response.writeHead(404, { 'Content-Type': 'application/json' })
   response.end(JSON.stringify({ error: 'not found' }))
 })
 
 const io = new Server(httpServer, {
-  cors: { origin: true, credentials: true },
+  cors: { origin: true },
   maxHttpBufferSize: 1e7,
 })
 
@@ -28,14 +48,27 @@ const getSession = (sessionId) => sessions.get(sessionId)
 io.on('connection', (socket) => {
   socket.on('create-session', (ack) => {
     const sessionId = randomUUID()
+    const shortCode = generateShortCode()
+    shortCodes.set(shortCode, sessionId)
     sessions.set(sessionId, {
       sessionId,
+      shortCode,
       createdAt: new Date().toISOString(),
       metadata: null,
       peers: new Set([socket.id]),
     })
     socket.join(sessionId)
     socket.data.sessionId = sessionId
+    ack?.({ success: true, sessionId, shortCode })
+  })
+
+  socket.on('resolve-session', (payload, ack) => {
+    const sessionId = shortCodes.get(payload?.shortCode)
+    const session = sessionId ? getSession(sessionId) : null
+    if (!session) {
+      ack?.({ success: false, message: 'session expired or invalid' })
+      return
+    }
     ack?.({ success: true, sessionId })
   })
 
@@ -102,6 +135,7 @@ io.on('connection', (socket) => {
       ack?.({ success: false, message: 'session expired or invalid' })
       return
     }
+    if (session.shortCode) shortCodes.delete(session.shortCode)
     socket
       .to(payload.sessionId)
       .emit('transfer-complete', {

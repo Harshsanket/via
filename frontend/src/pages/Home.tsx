@@ -5,7 +5,7 @@ import { Button } from '../components/ui/button';
 export default function Home() {
   return (
     <div className="flex w-full flex-1 flex-col items-center">
-      <section className="flex min-h-[calc(100dvh-6rem)] w-full flex-col items-center justify-center px-2 py-12 text-center">
+      <section className="flex w-full flex-1 flex-col items-center justify-center px-2 py-12 text-center">
         <h1 className="mb-5 font-serif text-7xl leading-none tracking-tight sm:text-8xl md:text-9xl">
           Via.
         </h1>

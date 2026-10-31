@@ -7,7 +7,6 @@
     "outDir": "./dist",
     "strict": true,
     "esModuleInterop": true,
-    "baseUrl": "./src",
     "skipLibCheck": true,
     "allowSyntheticDefaultImports": true,
     "noEmitOnError": false

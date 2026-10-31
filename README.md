@@ -2,7 +2,7 @@
 
 Private, browser-to-browser file sharing for your home network.
 
-**Version 1.0.0** · [Setup guide](SETUP.md) · [Release notes](CHANGELOG.md) · [GPL-3.0-only](LICENSE)
+**Version 1.1.0** · [Setup guide](SETUP.md) · [Features](FEATURES.md) · [Release notes](CHANGELOG.md) · [GPL-3.0-only](LICENSE)
 
 ---
 
@@ -27,6 +27,17 @@ The project has three parts:
 | `frontend/` | React + Vite single-page app: the send and receive pages, WebRTC transfer, and end-to-end checks |
 | `backend/` | Node.js + Express + Socket.IO signaling server, with Redis for short-lived sessions |
 | `docker/`, `docker-compose.yml` | The home-network deployment: Caddy (HTTPS), nginx, the API, Redis, coturn and a DuckDNS updater |
+
+---
+
+## What's new in 1.1.0
+
+- **Short receive links.** Senders now share a four-digit link such as `https://host/1234#k=…`; the server never sees the key.
+- **Host-only admin console** at `http://127.0.0.1:8081/config` for short-link mode/length, session TTLs, limits and STUN/TURN URLs.
+- **Rebuilt send and receive pages** with a three-step tracker and a unified file card.
+- **Dependencies refreshed** to latest releases; backend dev server runs on `tsx watch`.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ---
 
@@ -59,7 +70,7 @@ Any current Chrome, Edge, Firefox or Safari can send and receive. Chrome and Edg
 
 **To develop it**
 
-- Node.js 24 (the backend and the Docker images use 24; the frontend also builds on 22).
+- Node.js 24 (the backend, the frontend and every Docker image use 24).
 - Docker, for the Redis and coturn containers used by the backend's integration tests.
 - Playwright's Chromium for the frontend's end-to-end tests: `npx playwright install chromium`.
 
@@ -114,12 +125,13 @@ For local development, the apps use their own files: copy
 
 ## Configuration
 
-All settings live in one of four places:
+All settings live in one of five places:
 
 | Where | Controls | Reference |
 |---|---|---|
-| Root `.env` | Deployment secrets, DuckDNS, LAN IP, session lifetimes | [SETUP.md §4.3](SETUP.md#43-configure-the-root-env) |
-| `docker-compose.yml` | Backend runtime values, networks, volumes, hardening | [SETUP.md §4.6–4.7](SETUP.md#46-the-compose-stack) |
+| Root `.env` | Deployment secrets, DuckDNS, LAN IP, default session lifetimes | [SETUP.md §4.3](SETUP.md#43-configure-the-root-env) |
+| Host-only admin page | Short-link mode/length, session TTLs, limits, STUN/TURN URLs, admin credentials | Open `http://127.0.0.1:8081/config` on the host |
+| `docker-compose.yml` | Backend runtime defaults, networks, volumes, hardening | [SETUP.md §4.6–4.7](SETUP.md#46-the-compose-stack) |
 | `backend/.env` | Backend behavior for local development | [SETUP.md §4.9](SETUP.md#49-local-development) |
 | `frontend/.env` / build args | `VITE_*` values baked into the frontend | [SETUP.md §4.8](SETUP.md#48-frontend-build-configuration) |
 
@@ -135,6 +147,13 @@ The six required root `.env` values are:
 | `TURN_SECRET` | A different `openssl rand -hex 32` |
 
 Never commit or share `.env`. It is listed in `.gitignore` and `.dockerignore`.
+
+The admin page is served only on the host loopback
+(`http://127.0.0.1:8081/config`); the public Via address returns 404 for it.
+The default account is `admin` / `admin`, and it must be changed before any
+other setting can be saved. Admin settings persist in the `settings` Docker
+volume; secrets such as `TURN_SECRET`, the Redis password and the DuckDNS token
+stay in `.env` and are never shown in the browser.
 
 The full variable tables — backend runtime, frontend build args, session
 lifetimes, TURN credentials and the legacy single-container variables — are in
@@ -167,7 +186,7 @@ Anyone outside who looks up the name gets a private IP that leads nowhere.
  create session  ─────────────────▶  session in Redis
  key K (stays in the #fragment)
  encrypt name with K ─────────────▶  stores ciphertext
- share link …/receive/<id>#k=K  ─────────── (by hand) ──────────▶ open link
+ share link …/1234#k=K        ─────────── (by hand) ──────────▶ open link
                                      join  ◀──────────────────── join session
  offer / ICE  ◀──────────────────▶   relays only  ◀────────────▶ answer / ICE
  ═════════════ direct, encrypted WebRTC data channel (DTLS) ═════════════
@@ -271,7 +290,7 @@ in [SETUP.md §Troubleshooting](SETUP.md#troubleshooting).
 | Command | What it does |
 |---|---|
 | `npm run build` | Compile TypeScript to `dist/` |
-| `npm run dev` | Run with auto-reload (nodemon) |
+| `npm run dev` | Run with auto-reload (tsx watch) |
 | `npm test` | Build, then run the smoke checks (`scripts/smoke.mjs`); no services needed |
 | `npm run db:up` | Start the test Redis and coturn (`backend/docker-compose.yml`) |
 | `npm run test:integration` | Integration tests against the real server, Redis and coturn (needs `db:up`) |
@@ -299,7 +318,7 @@ The integration suites cover sessions, origin checks, session integrity, payload
 | `./scripts/start.sh` | Detect `LAN_IP`, update `.env`, build and start everything |
 | `docker compose up -d --build` | Build and start everything using the current `.env` |
 
-The project includes CI workflows and Dependabot configuration for both apps: dependency audit, formatting or lint, unit and integration or end-to-end tests, and a container build.
+The project includes CI workflows (`.github/workflows/backend.yml`, `frontend.yml`) and Dependabot configuration for both apps: dependency audit, formatting or lint, unit and integration or end-to-end tests, and a container build.
 
 ---
 

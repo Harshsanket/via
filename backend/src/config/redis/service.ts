@@ -1,5 +1,5 @@
+import { randomInt } from "node:crypto";
 import { ApiError } from "../../utils/api-error.js";
-import { env } from "../env.js";
 import { redisClient } from "./index.js";
 import type {
   SessionID,
@@ -14,15 +14,20 @@ import {
   NO_PEER,
   NO_FILE_SELECTED,
   SESSION_FIELDS,
+  SHORT_CODE_ACTIVE_KEY,
   createSessionObject,
   peerSessionCountKey,
   peerStorageKey,
   sessionStorageKey,
+  shortCodeStorageKey,
 } from "./constants.js";
+import { getSettings } from "../settings.js";
 import {
   runCompleteTransferScript,
   runJoinSessionScript,
   runLeaveSessionScript,
+  runReleaseShortCodeScript,
+  runReserveShortCodeScript,
   runSetStatusScript,
   runStoreMetadataScript,
   type GuardedWriteStatus,
@@ -43,7 +48,8 @@ const F = SESSION_FIELDS;
  * granted TTL is always the smaller of the requested one and the remaining
  * lifetime.
  */
-const remainingLifetime = (): number => env.sessionMaxLifetimeSeconds;
+const remainingLifetime = (): number =>
+  getSettings().sessions.maxLifetimeSeconds;
 
 const releasePeerSessionSlot = async (peerId: PeerID): Promise<void> => {
   const key = peerSessionCountKey(peerId);
@@ -51,6 +57,159 @@ const releasePeerSessionSlot = async (peerId: PeerID): Promise<void> => {
 
   const remaining = await redisClient.decr(key);
   if (remaining <= 0) await redisClient.del(key);
+};
+
+const ALPHABETS_BY_MODE = {
+  numeric: "0123456789",
+  alphanumeric: "0123456789abcdefghijklmnopqrstuvwxyz",
+} as const;
+
+/** Paths that must never become a receive link. */
+const RESERVED_SHORT_CODES = new Set([
+  "admin",
+  "assets",
+  "config",
+  "home",
+  "login",
+  "logout",
+  "send",
+  "static",
+]);
+
+const shortCodeConfig = (): {
+  alphabet: string;
+  length: number;
+  totalCapacity: number;
+  maxActive: number;
+  reserved: Set<string>;
+} => {
+  const { mode, length } = getSettings().shortLinks;
+  const alphabet = ALPHABETS_BY_MODE[mode];
+  const totalCapacity = alphabet.length ** length;
+  const reserved = new Set(
+    [...RESERVED_SHORT_CODES].filter(
+      (code) =>
+        code.length === length &&
+        [...code].every((character) => alphabet.includes(character)),
+    ),
+  );
+  return {
+    alphabet,
+    length,
+    totalCapacity,
+    maxActive: totalCapacity - reserved.size,
+    reserved,
+  };
+};
+
+const codeFromIndex = (
+  index: number,
+  alphabet: string,
+  length: number,
+): string => {
+  let code = "";
+  let remaining = index;
+  for (let position = 0; position < length; position += 1) {
+    code = alphabet[remaining % alphabet.length] + code;
+    remaining = Math.floor(remaining / alphabet.length);
+  }
+  return code;
+};
+
+/**
+ * Picks a free code and reserves it. Random attempts keep active links spread
+ * across the space; the scan only runs when the configured space is small
+ * enough to enumerate and the random probes keep hitting used codes.
+ */
+const reserveShortCode = async (
+  sessionId: SessionID,
+  ttlSeconds: number,
+): Promise<string> => {
+  const { alphabet, length, totalCapacity, maxActive, reserved } =
+    shortCodeConfig();
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const code = codeFromIndex(randomInt(0, totalCapacity), alphabet, length);
+    if (reserved.has(code)) continue;
+
+    const result = await runReserveShortCodeScript({
+      code,
+      sessionId,
+      ttlSeconds,
+      capacity: maxActive,
+    });
+
+    if (result === "ok") return code;
+    if (result === "capacity") {
+      throw new ApiError(429, "all short links are in use");
+    }
+  }
+
+  await redisClient.zRemRangeByScore(
+    SHORT_CODE_ACTIVE_KEY,
+    "-inf",
+    Math.floor(Date.now() / 1000).toString(),
+  );
+  const active = new Set(
+    await redisClient.zRange(SHORT_CODE_ACTIVE_KEY, 0, -1),
+  );
+  if (active.size >= maxActive) {
+    throw new ApiError(429, "all short links are in use");
+  }
+
+  if (totalCapacity <= 100_000) {
+    const start = randomInt(0, totalCapacity);
+    for (let offset = 0; offset < totalCapacity; offset += 1) {
+      const code = codeFromIndex(
+        (start + offset) % totalCapacity,
+        alphabet,
+        length,
+      );
+      if (reserved.has(code) || active.has(code)) continue;
+
+      const result = await runReserveShortCodeScript({
+        code,
+        sessionId,
+        ttlSeconds,
+        capacity: maxActive,
+      });
+      if (result === "ok") return code;
+      if (result === "capacity") break;
+    }
+  }
+
+  throw new ApiError(429, "unable to allocate a short link");
+};
+
+const releaseShortCode = async (
+  code: string,
+  sessionId: SessionID,
+): Promise<void> => {
+  await runReleaseShortCodeScript({ code, sessionId });
+};
+
+/** Resolves a short alias to the server-issued session UUID. */
+export const resolveShortCode = async (
+  shortCode: string,
+): Promise<SessionID | null> => {
+  assertValidStrings([shortCode], "resolveShortCode");
+
+  const sessionId = await redisClient.get(shortCodeStorageKey(shortCode));
+  if (!sessionId) return null;
+
+  if (!(await redisKeyExists(sessionStorageKey(sessionId)))) {
+    // The session expired between the two reads, or an old alias survived a
+    // crash. Drop it so the code can be reused.
+    await redisClient
+      .multi()
+      .del(shortCodeStorageKey(shortCode))
+      .zRem(SHORT_CODE_ACTIVE_KEY, shortCode)
+      .exec();
+    logRedis("warn", "resolveShortCode", "REMOVED STALE SHORT CODE", shortCode);
+    return null;
+  }
+
+  return sessionId;
 };
 
 // register peer - [socket] - index -> initSocket -> connection
@@ -61,7 +220,7 @@ export const registerPeer = async (peerId: PeerID): Promise<void> => {
     // NX: never overwrite a live mapping. A recovered connection keeps its
     // socket id, and resetting the key here orphaned the peer's session.
     await redisClient.set(peerStorageKey(peerId), NO_SESSION, {
-      EX: env.sessionTtlSeconds,
+      EX: getSettings().sessions.ttlSeconds,
       NX: true,
     });
     logRedis("success", "registerPeer", "REGISTERED NEW PEER", peerId);
@@ -72,11 +231,11 @@ export const registerPeer = async (peerId: PeerID): Promise<void> => {
 };
 
 // create session - [socket] session.ts -> [handleSessions] -> [create-session]
-/** Returns the TTL actually granted to the session, in seconds. */
+/** Returns the TTL actually granted to the session and its short-link code. */
 export const createSession = async ({
   sessionId,
   peerId,
-}: SessionParams): Promise<number> => {
+}: SessionParams): Promise<{ ttlSeconds: number; shortCode: string }> => {
   assertValidStrings([sessionId, peerId], "createSession");
 
   const existingSession = await getPeerSessionId(peerId, "createSession");
@@ -90,9 +249,10 @@ export const createSession = async ({
     throw new ApiError(409, "peer already in session");
   }
 
+  const settings = getSettings();
   // INCR is atomic, so two concurrent creates cannot both pass the limit.
   const ownedSessions = await redisClient.incr(peerSessionCountKey(peerId));
-  if (ownedSessions > env.maxActiveSessionsPerPeer) {
+  if (ownedSessions > settings.limits.maxActiveSessionsPerPeer) {
     await redisClient.decr(peerSessionCountKey(peerId));
     logRedis(
       "error",
@@ -105,15 +265,30 @@ export const createSession = async ({
 
   const sessionTtl = Math.max(
     1,
-    Math.min(env.sessionTtlSeconds, remainingLifetime()),
+    Math.min(settings.sessions.ttlSeconds, remainingLifetime()),
   );
   const peerTtl = Math.max(
     1,
-    Math.min(env.refreshSessionTtlSeconds, remainingLifetime()),
+    Math.min(settings.sessions.refreshTtlSeconds, remainingLifetime()),
   );
 
+  let shortCode: string;
   try {
-    const session = createSessionObject(peerId);
+    shortCode = await reserveShortCode(sessionId, sessionTtl);
+  } catch (error) {
+    // Do not burn the peer's session slot when the code space is full.
+    await releasePeerSessionSlot(peerId).catch(() => undefined);
+    logRedis(
+      "error",
+      "createSession::[reserveShortCode]",
+      "UNABLE TO RESERVE SHORT CODE",
+      error,
+    );
+    throw error;
+  }
+
+  try {
+    const session = createSessionObject(peerId, shortCode);
     await redisClient
       .multi()
       .hSet(sessionStorageKey(sessionId), session) // store session details
@@ -126,12 +301,14 @@ export const createSession = async ({
       SESSION: sessionId,
       PEER: peerId,
       TTL: sessionTtl,
+      SHORT_CODE: shortCode,
     });
 
-    return sessionTtl;
+    return { ttlSeconds: sessionTtl, shortCode };
   } catch (error) {
-    // Do not burn the peer's session slot when creation fails.
-    await redisClient.decr(peerSessionCountKey(peerId)).catch(() => undefined);
+    // Do not burn the peer's session slot or the short code when creation fails.
+    await releasePeerSessionSlot(peerId).catch(() => undefined);
+    await releaseShortCode(shortCode, sessionId).catch(() => undefined);
     logRedis("error", "createSession", "ERROR WHILE STORING SESSION", error);
     throw new ApiError(500, "unable to create session");
   }
@@ -194,7 +371,7 @@ export const joinSession = async ({
       peerId,
       replaceablePeerId,
       receiverToken,
-      desiredTtlSeconds: env.refreshSessionTtlSeconds,
+      desiredTtlSeconds: getSettings().sessions.refreshTtlSeconds,
       maxLifetimeSeconds: remainingLifetime(),
     });
   } catch (error) {
@@ -467,12 +644,13 @@ export const completeTransfer = async (
     ttlSeconds: number;
   };
   try {
+    const settings = getSettings();
     result = await runCompleteTransferScript({
       sessionId,
       peerId,
       status: SessionStatus.COMPLETED,
-      completedTtlSeconds: env.completedSessionTtlSeconds,
-      maxLifetimeSeconds: env.sessionMaxLifetimeSeconds,
+      completedTtlSeconds: settings.sessions.completedTtlSeconds,
+      maxLifetimeSeconds: settings.sessions.maxLifetimeSeconds,
     });
   } catch (error) {
     logRedis(

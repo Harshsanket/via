@@ -4,7 +4,10 @@ import ReceiveView from './ReceiveView'
 import { useReceiveSession } from './useReceiveSession'
 
 export default function ReceivePage() {
-  const { sessionId } = useParams<{ sessionId: string }>()
-  const session = useReceiveSession(sessionId)
+  const { sessionId, shortCode } = useParams<{
+    sessionId: string
+    shortCode: string
+  }>()
+  const session = useReceiveSession(sessionId ?? shortCode)
   return <ReceiveView session={session} />
 }

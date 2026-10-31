@@ -15,7 +15,6 @@ interface FileDetailsCardProps {
   fileSize: number
   mimeType: string
   addedAt?: Date | null
-  sessionId?: string
   ttlSeconds: number | null
   ttlNearExpiry?: boolean
   status?: ReactNode
@@ -46,7 +45,6 @@ export default function FileDetailsCard({
   fileSize,
   mimeType,
   addedAt,
-  sessionId,
   ttlSeconds,
   ttlNearExpiry = false,
   status,
@@ -96,39 +94,26 @@ export default function FileDetailsCard({
             </div>
           )}
 
-          {(ttlSeconds !== null || sessionId) && (
+          {ttlSeconds !== null && (
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm">
-              {ttlSeconds !== null && (
-                <span className="flex items-center gap-1.5">
-                  <Clock
-                    className={`h-3.5 w-3.5 shrink-0 ${
-                      ttlNearExpiry ? 'text-red-500' : 'text-amber-500'
-                    }`}
-                    aria-hidden="true"
-                  />
-                  <span className="font-light text-muted-foreground">
-                    Session expires in
-                  </span>
-                  <span
-                    className={`font-semibold ${
-                      ttlNearExpiry ? 'text-red-300' : 'text-amber-400'
-                    }`}
-                  >
-                    {formatTTL(ttlSeconds)}
-                  </span>
+              <span className="flex items-center gap-1.5">
+                <Clock
+                  className={`h-3.5 w-3.5 shrink-0 ${
+                    ttlNearExpiry ? 'text-red-500' : 'text-amber-500'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="font-light text-muted-foreground">
+                  Session expires in
                 </span>
-              )}
-
-              {sessionId && (
-                <span className="flex items-center gap-2">
-                  <span className="font-light text-muted-foreground">
-                    Session
-                  </span>
-                  <span className="rounded-md bg-white/10 px-2 py-0.5 font-mono text-xs text-muted-foreground">
-                    {sessionId.slice(0, 8)}…
-                  </span>
+                <span
+                  className={`font-semibold ${
+                    ttlNearExpiry ? 'text-red-300' : 'text-amber-400'
+                  }`}
+                >
+                  {formatTTL(ttlSeconds)}
                 </span>
-              )}
+              </span>
             </div>
           )}
         </div>

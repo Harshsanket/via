@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Socket } from 'socket.io-client'
 
 import { useLogger } from '../../hooks/useLogger'
 import { useSessionTtl } from '../../hooks/useSessionTtl'
@@ -8,6 +7,7 @@ import {
   BUFFER_LOW_THRESHOLD,
   CHUNK_SIZE,
   DEFAULT_STUN_SERVERS,
+  DIRECT_CONNECTION_ERROR,
   MAX_RECOVERY_ATTEMPTS,
 } from '../../lib/constants'
 import { Crc32 } from '../../lib/crc32'
@@ -32,7 +32,10 @@ import {
   type AuthFrame,
   type MetadataFrame,
 } from '../../lib/transfer-protocol'
-import { buildReceiveUrl } from '../../lib/validation'
+import {
+  buildReceiveUrl,
+  buildShortReceiveUrl,
+} from '../../lib/validation'
 import {
   IceCandidateBuffer,
   closePeerConnection,
@@ -89,6 +92,12 @@ const SESSION_ACK_TIMEOUT = 15_000
 const DRAIN_TIMEOUT = 20_000
 const RECOVERY_TIMEOUT = 45_000
 const YIELD_EVERY_CHUNKS = 8
+/**
+ * A first negotiation sometimes fails on one side (ICE gathering/connectivity
+ * timeout) even though the same peers connect on a second attempt. Wait long
+ * enough for stale answers from the failed offer to arrive before replacing it.
+ */
+const PRE_TRANSFER_RETRY_DELAY_MS = 1_000
 
 class TransferAbortedError extends Error {}
 class TransferInterruptedError extends Error {}
@@ -104,6 +113,7 @@ class StaleConnectionError extends Error {}
 interface RetainedSendSession {
   file: File
   sessionId: string
+  shortCode: string
   linkKey: string
   uploadTime: Date
 }
@@ -166,16 +176,17 @@ const AUTH_TIMEOUT_MS = 15_000
 const MAX_PENDING_FRAMES = 32
 
 export function useSendSession() {
-  const socketRef = useRef<Socket | null>(null)
-  socketRef.current ??= getSocket()
-  const socket = socketRef.current
-
-  const restoredRef = useRef<RetainedSendSession | null>(retainedSendSession)
-  const restored = restoredRef.current
+  // Lazy state rather than refs: both are fixed for the hook's lifetime and
+  // are read during render.
+  const [socket] = useState(getSocket)
+  const [restored] = useState<RetainedSendSession | null>(
+    () => retainedSendSession,
+  )
   const didRestoreRef = useRef(false)
 
   const [file, setFile] = useState<File | null>(restored?.file ?? null)
   const [sessionId, setSessionId] = useState(restored?.sessionId ?? '')
+  const [shortCode, setShortCode] = useState(restored?.shortCode ?? '')
   const [copied, setCopied] = useState(false)
   const [transferProgress, setTransferProgress] = useState(0)
   const [uploadTime, setUploadTime] = useState<Date | null>(
@@ -199,6 +210,7 @@ export function useSendSession() {
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
   const fileRef = useRef<File | null>(restored?.file ?? null)
   const sessionIdRef = useRef(restored?.sessionId ?? '')
+  const shortCodeRef = useRef(restored?.shortCode ?? '')
   const stageRef = useRef<TransferStage>(restored ? 'session_created' : 'idle')
   const webrtcInitiatedRef = useRef(false)
   /** Increments whenever a pending peer setup must be discarded. */
@@ -212,6 +224,9 @@ export function useSendSession() {
   const waitingForPeerRef = useRef(restored !== null)
   const recoveryAttemptsRef = useRef(0)
   const recoveryTimerRef = useRef<number | null>(null)
+  /** Fresh offers after a pre-transfer negotiation failure, not a resume. */
+  const connectionRetriesRef = useRef(0)
+  const connectionRetryTimerRef = useRef<number | null>(null)
   const pauseResolversRef = useRef<Array<() => void>>([])
   const iceConfigPromiseRef = useRef<Promise<IceConfig> | null>(null)
   const iceBufferRef = useRef(new IceCandidateBuffer())
@@ -255,6 +270,13 @@ export function useSendSession() {
     }
   }, [])
 
+  const clearConnectionRetryTimer = useCallback(() => {
+    if (connectionRetryTimerRef.current !== null) {
+      window.clearTimeout(connectionRetryTimerRef.current)
+      connectionRetryTimerRef.current = null
+    }
+  }, [])
+
   const releasePauseWaiters = useCallback(() => {
     const waiters = pauseResolversRef.current
     pauseResolversRef.current = []
@@ -278,7 +300,8 @@ export function useSendSession() {
     iceBufferRef.current.reset()
     webrtcInitiatedRef.current = false
     webrtcAttemptRef.current += 1
-  }, [])
+    clearConnectionRetryTimer()
+  }, [clearConnectionRetryTimer])
 
   const failTransfer = useCallback(
     (message: string, notifyPeer = true) => {
@@ -305,6 +328,44 @@ export function useSendSession() {
     },
     [addLog, clearRecoveryTimer, releasePauseWaiters, resetPeerConnection, socket],
   )
+
+  /**
+   * A failed first negotiation is usually transient: reloading the receiver
+   * negotiates the same pair again successfully. Retry here instead of making
+   * the user refresh.
+   */
+  const schedulePreTransferRetry = useCallback(() => {
+    if (
+      finishedRef.current ||
+      transferAbortedRef.current ||
+      transferStartedRef.current
+    ) {
+      return
+    }
+
+    if (connectionRetriesRef.current >= MAX_RECOVERY_ATTEMPTS) {
+      failTransfer(DIRECT_CONNECTION_ERROR)
+      return
+    }
+
+    connectionRetriesRef.current += 1
+    addLog('Connection failed — retrying automatically…', 'connecting')
+    resetPeerConnection()
+    setStage('webrtc_negotiating')
+
+    connectionRetryTimerRef.current = window.setTimeout(() => {
+      connectionRetryTimerRef.current = null
+      if (
+        finishedRef.current ||
+        transferAbortedRef.current ||
+        transferStartedRef.current ||
+        waitingForPeerRef.current
+      ) {
+        return
+      }
+      void initiateConnectionRef.current(false)
+    }, PRE_TRANSFER_RETRY_DELAY_MS)
+  }, [addLog, failTransfer, resetPeerConnection])
 
   const handleSessionExpired = useCallback(() => {
     if (finishedRef.current) return
@@ -578,20 +639,21 @@ export function useSendSession() {
           if (transferStartedRef.current && !finishedRef.current) {
             beginRecoveryRef.current('The peer connection failed')
           } else if (!finishedRef.current) {
-            failTransfer(
-              'Could not connect directly to the other device. Make sure both devices are on the same Wi-Fi (not a guest network), with client/AP isolation off and any VPN disabled.',
-            )
+            schedulePreTransferRetry()
           }
         } else if (state === 'disconnected') {
           addLog('Peer connection temporarily lost; trying to recover…', 'info')
         } else if (state === 'connected') {
+          // The retry budget is cleared after peer verification, not here: a
+          // connection that drops again before verification must still count.
+          clearConnectionRetryTimer()
           addLog('Peer connection established', 'success')
         }
       }
 
       return pc
     },
-    [addLog, failTransfer, socket],
+    [addLog, clearConnectionRetryTimer, schedulePreTransferRetry, socket],
   )
 
   const clearAuthTimer = useCallback(() => {
@@ -671,6 +733,10 @@ export function useSendSession() {
       }
 
       peerVerifiedRef.current = true
+      // A verified channel is a real success; a later pre-transfer failure gets
+      // a fresh retry budget instead of inheriting the earlier attempts.
+      connectionRetriesRef.current = 0
+      clearConnectionRetryTimer()
       clearAuthTimer()
       const code = await computeVerificationCode(key, view.local, view.remote)
       setVerificationCode(code)
@@ -682,7 +748,13 @@ export function useSendSession() {
       pendingFramesRef.current = []
       for (const raw of queued) handleChannelControlRef.current(raw)
     },
-    [addLog, clearAuthTimer, currentFingerprints, failTransfer],
+    [
+      addLog,
+      clearAuthTimer,
+      clearConnectionRetryTimer,
+      currentFingerprints,
+      failTransfer,
+    ],
   )
 
   useEffect(() => {
@@ -836,7 +908,7 @@ export function useSendSession() {
   }, [renegotiate])
 
   useEffect(() => {
-    const snapshot = restoredRef.current
+    const snapshot = restored
     if (!snapshot || didRestoreRef.current) return
     didRestoreRef.current = true
 
@@ -845,7 +917,7 @@ export function useSendSession() {
     // The receiver may still be waiting in the session; offer a fresh
     // connection. If it is not there yet, peer-joined starts a new one.
     void initiateConnectionRef.current(false)
-  }, [addLog])
+  }, [addLog, restored])
 
   const beginRecovery = useCallback(
     (reason: string) => {
@@ -973,6 +1045,9 @@ export function useSendSession() {
     const handlePeerJoined = () => {
       const wasWaiting = waitingForPeerRef.current
       waitingForPeerRef.current = false
+      // A (re)joining receiver is a fresh negotiation, so allow retries again.
+      connectionRetriesRef.current = 0
+      clearConnectionRetryTimer()
 
       // Joining refreshes the session TTL on the server; re-seed the local
       // countdown so the sender does not display the original, shorter one.
@@ -1004,6 +1079,8 @@ export function useSendSession() {
 
     const handlePeerLeft = () => {
       waitingForPeerRef.current = true
+      connectionRetriesRef.current = 0
+      clearConnectionRetryTimer()
 
       if (transferStartedRef.current && !finishedRef.current) {
         addLog(
@@ -1026,8 +1103,12 @@ export function useSendSession() {
     }
 
     const handleAnswer = async ({ answer }: AnswerEvent) => {
+      if (finishedRef.current || transferAbortedRef.current) return
+
       const pc = peerConnectionRef.current
-      if (!pc) return
+      // An answer for an offer we already replaced (a retry) must not be
+      // applied to the new peer connection.
+      if (!pc || pc.signalingState !== 'have-local-offer') return
 
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(answer))
@@ -1077,7 +1158,13 @@ export function useSendSession() {
       offTransferError(socket, handleTransferError)
       offTransferComplete(socket, handleTransferComplete)
     }
-  }, [addLog, failTransfer, resetPeerConnection, socket])
+  }, [
+    addLog,
+    clearConnectionRetryTimer,
+    failTransfer,
+    resetPeerConnection,
+    socket,
+  ])
 
   const handleCreateSession = useCallback(
     (selectedFile: File) => {
@@ -1116,6 +1203,10 @@ export function useSendSession() {
         sessionIdRef.current = id
         setSessionId(id)
 
+        const code = response.shortCode ?? ''
+        shortCodeRef.current = code
+        setShortCode(code)
+
         // A fresh key per session; it only ever travels in the link fragment.
         const linkKey = generateLinkKey()
         linkKeyRef.current = linkKey
@@ -1123,6 +1214,7 @@ export function useSendSession() {
         retainedSendSession = {
           file: selectedFile,
           sessionId: id,
+          shortCode: code,
           linkKey,
           uploadTime: selectedAt,
         }
@@ -1136,6 +1228,7 @@ export function useSendSession() {
         finishedRef.current = false
         waitingForPeerRef.current = false
         recoveryAttemptsRef.current = 0
+        connectionRetriesRef.current = 0
         setReceiverConfirmed(false)
         setSessionError(null)
         addLog('Session created — share the link with the receiver', 'success')
@@ -1226,6 +1319,7 @@ export function useSendSession() {
     pausedRef.current = false
     waitingForPeerRef.current = false
     recoveryAttemptsRef.current = 0
+    connectionRetriesRef.current = 0
     transferStartedAtRef.current = Date.now()
     transferRateRef.current.start(currentFile.size, 0)
     lastRateUiAtRef.current = 0
@@ -1296,11 +1390,14 @@ export function useSendSession() {
     checksumRef.current = null
     iceConfigPromiseRef.current = null
     recoveryAttemptsRef.current = 0
+    connectionRetriesRef.current = 0
     transferRateRef.current.reset()
     lastRateUiAtRef.current = 0
 
     setFile(null)
     setSessionId('')
+    shortCodeRef.current = ''
+    setShortCode('')
     setStage('idle')
     setSessionError(null)
     setTransferProgress(0)
@@ -1348,8 +1445,11 @@ export function useSendSession() {
     if (!sessionIdRef.current) return
 
     try {
+      const code = shortCodeRef.current
       await navigator.clipboard.writeText(
-        buildReceiveUrl(sessionIdRef.current, linkKeyRef.current),
+        code
+          ? buildShortReceiveUrl(code, linkKeyRef.current)
+          : buildReceiveUrl(sessionIdRef.current, linkKeyRef.current),
       )
       setCopied(true)
       addLog('Receive link copied to clipboard', 'success')
@@ -1398,6 +1498,7 @@ export function useSendSession() {
   return {
     file,
     sessionId,
+    shortCode,
     verificationCode,
     copied,
     transferProgress,

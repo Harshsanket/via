@@ -3,6 +3,13 @@
 export interface CreateSessionResponse {
   success: boolean
   sessionId?: string
+  shortCode?: string
+  message?: string
+}
+
+export interface ResolveSessionResponse {
+  success: boolean
+  sessionId?: string
   message?: string
 }
 

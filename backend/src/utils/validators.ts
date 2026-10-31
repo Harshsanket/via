@@ -7,3 +7,13 @@ const SESSION_ID_PATTERN =
 
 export const isSessionId = (value: unknown): value is string =>
   typeof value === "string" && SESSION_ID_PATTERN.test(value);
+
+/**
+ * Short codes are four digits today. The wider 4-6 alphanumeric shape is
+ * accepted so a future config option can turn on letters without breaking
+ * links created under the old setting.
+ */
+const SHORT_CODE_PATTERN = /^[a-z0-9]{4,6}$/;
+
+export const isShortCode = (value: unknown): value is string =>
+  typeof value === "string" && SHORT_CODE_PATTERN.test(value);

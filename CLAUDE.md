@@ -13,7 +13,8 @@ A self-hosted, browser-to-browser file sharing app for one home network. The **f
 ## 2. Layout and ownership
 
 ```
-via/                      ← project root: NOT a git repository
+via/                      ← project root: ONE git repo (github.com/Harshsanket/via)
+├── .github/              ← CI (backend.yml, frontend.yml) and Dependabot; GitHub reads only this one
 ├── README.md, CLAUDE.md, LICENSE (GPL-3.0-only; same text in backend/ and frontend/)
 ├── docker-compose.yml    ← the supported deployment (split, hardened stack)
 ├── .env / .env.example   ← secrets live in .env (never commit, never print)
@@ -22,20 +23,20 @@ via/                      ← project root: NOT a git repository
 │   ├── Caddyfile, caddy/Dockerfile   ← TLS edge + DuckDNS DNS-01 plugin
 │   ├── web.nginx.conf                ← nginx for the `web` service (USED)
 │   ├── nginx.conf, entrypoint.sh     ← single-container variant only
-├── backend/              ← its own git repo
-├── frontend/             ← its own git repo
+├── backend/              ← signaling server (Express + Socket.IO + Redis)
+├── frontend/             ← React app (Vite)
 └── docs-internal/        ← LOCAL-ONLY agent records; never commit, publish or upload
 ```
 
-- **Three separate places to commit:** `backend/` and `frontend/` are independent git repos, and the root is not under git at all. Changes to `docker/`, `docker-compose.yml`, `README.md` and `CLAUDE.md` aren't version-controlled unless the owner sets up a repo there.
+- **One repository.** `backend/`, `frontend/`, `docker/` and the docs were consolidated into a single repo at the root. Don't add `.github/` folders inside `backend/` or `frontend/`: GitHub ignores them.
 - **`docs-internal/` has its own rules** in `docs-internal/AGENTS.md` and `docs-internal/docs-internal/AGENT.md`. Follow them when you work there. Records of past work live in `docs-internal/docs-internal/docs/`:
   - `progress.md`: append-only work log;
   - `decisions.md`: ADR-0001 (DuckDNS + Caddy hosting), ADR-0002 (link-key verification);
   - `findings.md`, `security-hardening-plan.md`, `lan-hosting.md`.
 
   Read these for history and *why*. Append to `progress.md` and `decisions.md` in their format; never rewrite earlier entries.
-- **The frontend repo may contain the owner's own uncommitted work** (UI and theme changes). **Never `git add -A` in `frontend/`.** Stage only your own hunks, as the previous handoff did with `git apply --cached`, and leave the rest as it is.
-- **Commit and push only when asked.** Both repos have a `security-hardening` branch with earlier work; don't commit straight to `main`. The backend's `git config user.email` is a placeholder (`your-email@example.com`); ask the owner before committing under it.
+- **The working tree may contain the owner's own uncommitted work** (UI and theme changes). **Never `git add -A`.** Stage only your own hunks (`git apply --cached` works) and leave the rest as it is.
+- **Commit and push only when asked,** on a branch, not straight to `main`. The repo's `git config user.email` is a placeholder (`your-email@example.com`); ask the owner before committing under it.
 
 ### Key files
 
@@ -45,6 +46,7 @@ via/                      ← project root: NOT a git repository
 | Payload validation | `config/socket/utils.ts` (parsers and size caps) | `lib/server-events.ts` (server→client), `lib/transfer-protocol.ts` (peer frames) |
 | Sessions, atomically | `config/redis/scripts.ts` (Lua), `config/redis/service.ts` | — |
 | Rate limits and per-IP cap | `config/socket/rate-limit.ts` | — |
+| Runtime settings and admin auth | `config/settings.ts`, `controller/admin.controller.ts`, `middleware/admin-auth.ts` | `lib/admin-api.ts`, `pages/config/ConfigPage.tsx` |
 | Origin / CORS | `config/env.ts` (`isAllowedOrigin`), `server.ts` (`allowRequest`), `middleware/cors-middleware.ts` | — |
 | End-to-end verification and encryption | — | `lib/peer-auth.ts`; used in `pages/send/useSendSession.ts` and `pages/receive/useReceiveSession.ts` |
 | File writing | — | `lib/file-sink.ts` (save picker when available; otherwise OPFS/in-memory temporary sink offered as a download) |
@@ -87,6 +89,10 @@ npm run dev
 
 `NODE_ENV` isn't production in dev, so any origin is allowed when `CLIENT_ORIGIN` is empty.
 
+`npm run dev` runs `tsx watch` (no nodemon or ts-node). If the live stack is up, it already holds port 3478 and the test coturn exits; run the TURN tests against a spare port with `TEST_TURN_URL=turn:127.0.0.1:3479?transport=tcp` and a coturn started on 3479.
+
+**Tooling versions.** Everything is on its latest major except two deliberate pins: the frontend stays on TypeScript 6.0 because `typescript-eslint` doesn't support 7 yet (the backend, which has no ESLint, uses 7), and both apps keep `@types/node` on 24 to match the Node 24 runtime.
+
 ### Frontend development
 
 ```bash
@@ -104,6 +110,8 @@ npm run dev
 
 Web Crypto (used for verification) needs a secure context. `localhost` and `127.0.0.1` count; a LAN IP over plain HTTP doesn't.
 
+The Playwright config launches Chromium with `--disable-features=WebRtcHideLocalIpsWithMdns`. Both test peers share one host, and macOS may refuse to resolve Chromium's `.local` mDNS candidates for the test browser, which leaves every transfer stuck at "Connecting". Don't remove the flag.
+
 ---
 
 ## 4. How to work here
@@ -120,7 +128,7 @@ Web Crypto (used for verification) needs a secure context. `localhost` and `127.
 
 ### End-to-end security (frontend)
 
-- **The link key lives only in the URL fragment** (`/receive/<id>#k=<22 chars>`). Never put it in a query string, a header, a socket payload, logs, analytics (`lib/observability.ts`) or the server. `buildReceiveUrl(id, key)` and `extractReceiveLink` are the only ways in and out.
+- **The link key lives only in the URL fragment** (`/1234#k=<22 chars>`, or the legacy `/receive/<uuid>#k=<22 chars>`). The four-digit code is only a Redis alias for the session UUID. Never put the key in a query string, a header, a socket payload, logs, analytics (`lib/observability.ts`) or the server. `buildShortReceiveUrl` / `buildReceiveUrl` and `extractReceiveLink` are the only ways in and out.
 - **Nothing on the data channel is acted on before peer verification.**
   - Both hooks gate on `peerVerifiedRef`, queue up to 32 early frames, and replay them after verification.
   - New control frames must be added to `parseControlFrame` and handled *after* the gate.
@@ -133,6 +141,7 @@ Web Crypto (used for verification) needs a secure context. `localhost` and `127.
 ### Backend rules
 
 - **Session IDs are server-issued UUIDs** (`isSessionId`). Test fixtures must use UUID-shaped IDs; the smoke script uses `SAMPLE_SESSION_ID`.
+- **Short codes are aliases, not session IDs.** `short:<code>` in Redis maps to the UUID; `resolve-session` turns one into the other. Release paths must compare the mapping before deleting, or a late cleanup can erase a code that was already reused.
 - **Roles:**
   - only the creator may `store-file-metadata`, once;
   - only the receiver may send `transfer-start` and `transfer-complete`, and the server relays the **stored** name on completion;
@@ -182,6 +191,9 @@ Web Crypto (used for verification) needs a secure context. `localhost` and `127.
 - **`coturn` is the fallback relay, not the default path.** It is on `edge`, publishes 3478 (TCP/UDP) and UDP 49300-49340, and advertises `LAN_IP` via `--external-ip`. Its `denied-peer-ip` rules must keep it out of `172.16.0.0/12` (Docker networks) and `192.168.65.0/24` (Docker Desktop's NAT), plus loopback and link-local. `api` and `coturn` share `TURN_SECRET`; never expose that value to a client. Removing the relay is fine for same-LAN use, but phone↔computer transfers fail where AP isolation or blocked mDNS prevents a direct path.
 - **Docker Desktop on macOS shows clients as `192.168.65.1`,** so the per-IP limits effectively apply per household. Size them for that.
 - **Never forward router ports, and never print, commit or upload `.env`.** It holds the DuckDNS token and the Redis password.
+- **The admin console is loopback-only.** `web` publishes `127.0.0.1:8081:8081`; the public 8080 server returns 404 for `/config` and `/api/v1/admin/*`; the admin listener sets `X-Via-Admin: 1`, and the public listener clears it. The API refuses admin routes without that marker in production. Do not add a public route or Caddy proxy to 8081.
+- **Admin settings live in the `settings` volume** (`SETTINGS_PATH=/config/settings.json`). It contains the admin password hash and token secret. Never serve it, log it, or put it in the image. The default account is `admin` / `admin` with a forced change.
+- **Dynamic short codes are settings-driven.** The default is four numeric digits (10,000 codes); the admin page can switch to 4–6 lowercase alphanumeric codes. Generation excludes reserved paths (`send`, `config`, `assets`, etc.). `resolve-session` must keep accepting every previously issued shape, and release paths must compare `short:<code>` to the UUID before deleting.
 - **The Caddy volumes `caddy_data` and `caddy_config` hold the certificate.** Don't delete them casually: Let's Encrypt rate-limits repeated issuance.
 
 ---
@@ -220,6 +232,8 @@ What these cover:
 | Session integrity: roles, cross-session joins, recovery, no TTL-less writes | `backend/test/session-integrity.integration.test.mjs` |
 | Payload caps and UUID IDs | `backend/test/payload-limits.integration.test.mjs` |
 | Rate limits and per-IP cap | `backend/test/rate-limits.integration.test.mjs` |
+| Short links: allocation, release, reuse, full space | `backend/test/short-links*.mjs` |
+| Admin auth, forced password change, dynamic short links | `backend/test/admin.integration.test.mjs`; `frontend/e2e/config.spec.ts` |
 | TURN credential minting and relay acceptance | `backend/test/ice*.mjs`, `backend/test/turn-*.mjs` |
 | Fingerprint-swap (MITM), forged and replayed tags, metadata encryption | `frontend/src/lib/peer-auth.test.ts` |
 | Malformed server events | `frontend/src/lib/server-events.test.ts` |
@@ -230,7 +244,7 @@ What these cover:
 Set these first, then run the checks:
 
 ```bash
-R=(--resolve hs-via.duckdns.org:443:192.168.0.240); U=https://hs-via.duckdns.org
+R=(--resolve hs-via.duckdns.org:443:$(grep '^LAN_IP=' .env | cut -d= -f2)); U=https://hs-via.duckdns.org
 ```
 
 | Check | Command | Expected result |
@@ -241,6 +255,9 @@ R=(--resolve hs-via.duckdns.org:443:192.168.0.240); U=https://hs-via.duckdns.org
 | No credentials header | `curl -sD - -o /dev/null -H "Origin: $U" "${R[@]}" "$U/api/v1/health" \| grep -i allow-credentials` | prints nothing |
 | Rate limit | `for i in $(seq 80); do curl -s -o /dev/null -w '%{http_code} ' "${R[@]}" "$U/api/v1/health" & done; wait` | some `429` |
 | Spoofed IP ignored | `curl -s -o /dev/null -H 'X-Forwarded-For: 6.6.6.6' "${R[@]}" "$U/api/v1/health"`, then `docker compose logs web` | no `6.6.6.6` in the log |
+| Admin page is loopback-only | `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/config` | `200` |
+| Admin page absent from public site | `curl -s -o /dev/null -w '%{http_code}\n' "${R[@]}" "$U/config"` | `404` |
+| Admin API absent from public site | `curl -s -o /dev/null -w '%{http_code}\n' "${R[@]}" "$U/api/v1/admin/settings"` | `404` |
 
 Container isolation, expected to fail or be refused in each case:
 

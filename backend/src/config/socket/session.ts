@@ -1,3 +1,4 @@
+import { ApiError } from "../../utils/api-error.js";
 import {
   changeTransferStatus,
   completeTransfer,
@@ -6,6 +7,7 @@ import {
   getReceiverSlot,
   getSessionTTL,
   joinSession,
+  resolveShortCode,
   storeFileMetadata,
 } from "../redis/service.js";
 import { SessionStatus } from "../redis/types.js";
@@ -18,14 +20,18 @@ import type {
   CreateSessionResponse,
   JoinSessionPayload,
   JoinSessionResponse,
+  ResolveSessionPayload,
+  ResolveSessionResponse,
   TransferResponse,
   ViaSocket,
 } from "./types.js";
+import { getClientIp, takeShortCodeAttempt } from "./rate-limit.js";
 import {
   assertSessionAccess,
   logSocket,
   parseGetFileMetadataPayload,
   parseJoinSessionPayload,
+  parseResolveSessionPayload,
   parseSessionPayload,
   parseStoreFileMetadataPayload,
   parseTransferCompletePayload,
@@ -47,7 +53,7 @@ export const handleSessions = (socket: ViaSocket): void => {
       handle: async (_payload, ack) => {
         const sessionId = crypto.randomUUID();
 
-        const ttlSeconds = await createSession({
+        const { ttlSeconds, shortCode } = await createSession({
           sessionId,
           peerId: socket.id,
         });
@@ -55,13 +61,43 @@ export const handleSessions = (socket: ViaSocket): void => {
         socket.join(sessionId);
         scheduleSessionExpiry(sessionId, ttlSeconds);
 
-        ack?.({ success: true, sessionId });
+        ack?.({ success: true, sessionId, shortCode });
 
         logSocket(
           "success",
           "handleSessions:[create-session]",
           `SESSION CREATED BY PEER :: ${socket.id} ::`,
-          { sessionId, ttlSeconds },
+          { sessionId, shortCode, ttlSeconds },
+        );
+      },
+    },
+  );
+
+  // resolve a short link to the real session id
+  registerHandler<ResolveSessionPayload, ResolveSessionResponse>(
+    socket,
+    "resolve-session",
+    {
+      context: "handleSessions:[resolve-session]",
+      requireAck: true,
+      internalErrorMessage: "failed to resolve short link",
+      parse: parseResolveSessionPayload,
+      handle: async ({ shortCode }, ack) => {
+        if (!takeShortCodeAttempt(getClientIp(socket))) {
+          throw new ApiError(429, "too many attempts, try again in a minute");
+        }
+
+        const sessionId = await resolveShortCode(shortCode);
+        if (!sessionId) {
+          throw new ApiError(404, "session expired or invalid");
+        }
+
+        ack?.({ success: true, sessionId });
+        logSocket(
+          "success",
+          "handleSessions:[resolve-session]",
+          "SHORT CODE RESOLVED",
+          { shortCode, sessionId },
         );
       },
     },

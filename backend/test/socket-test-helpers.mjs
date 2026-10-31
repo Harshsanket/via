@@ -123,11 +123,21 @@ export const emitAck = (socket, event, payload) =>
     else socket.emit(event, payload, done);
   });
 
-export const createSession = async (socket) => {
+export const createSessionWithCode = async (socket) => {
   const ack = await emitAck(socket, "create-session");
   assert.equal(ack?.success, true, `create-session failed: ${ack?.message}`);
   assert.equal(typeof ack.sessionId, "string");
+  assert.match(ack.shortCode, /^[a-z0-9]{4,6}$/);
+  return ack;
+};
+
+export const createSession = async (socket) => {
+  const ack = await createSessionWithCode(socket);
   return ack.sessionId;
+};
+
+export const resolveSession = async (socket, shortCode) => {
+  return emitAck(socket, "resolve-session", { shortCode });
 };
 
 export const waitForHealth = async (baseUrl) => {

@@ -1,6 +1,6 @@
 export default function Footer() {
   return (
-    <footer className="fixed inset-x-0 bottom-0 z-20 w-full px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 text-center text-xs sm:px-6 sm:text-sm">
+    <footer className="w-full px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 text-center text-xs sm:px-6 sm:text-sm">
       <p className="font-extralight tracking-tight">
         <a
           href="https://github.com/harshsanket"

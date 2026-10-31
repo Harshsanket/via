@@ -13,6 +13,7 @@ import type {
   IceCandidateEvent,
   JoinSessionResponse,
   CreateSessionResponse,
+  ResolveSessionResponse,
   OfferEvent,
   SessionErrorEvent,
   SessionExpiredEvent,
@@ -21,6 +22,7 @@ import type {
   TransferCompleteEvent,
   TransferErrorEvent,
 } from '../socket/Types'
+import { isValidShortCode } from './validation'
 
 const MAX_NAME_LENGTH = 2048
 const MAX_MIME_LENGTH = 255
@@ -88,6 +90,23 @@ export function parseJoinSessionResponse(value: unknown): JoinSessionResponse | 
 }
 
 export function parseCreateSessionResponse(value: unknown): CreateSessionResponse | null {
+  if (!isRecord(value) || typeof value.success !== 'boolean') return null
+  if (!optionalBounded(value.sessionId, MAX_ID_LENGTH)) return null
+  if (
+    value.shortCode !== undefined &&
+    (typeof value.shortCode !== 'string' || !isValidShortCode(value.shortCode))
+  ) {
+    return null
+  }
+  return {
+    success: value.success,
+    ...(typeof value.sessionId === 'string' ? { sessionId: value.sessionId } : {}),
+    ...(typeof value.shortCode === 'string' ? { shortCode: value.shortCode } : {}),
+    ...(typeof value.message === 'string' ? { message: truncate(value.message) } : {}),
+  }
+}
+
+export function parseResolveSessionResponse(value: unknown): ResolveSessionResponse | null {
   if (!isRecord(value) || typeof value.success !== 'boolean') return null
   if (!optionalBounded(value.sessionId, MAX_ID_LENGTH)) return null
   return {

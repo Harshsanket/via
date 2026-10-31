@@ -80,6 +80,14 @@ test('sends a file through the real signaling backend', async ({
   })
   await expect(receiver.getByText(/unauthorized/i)).toHaveCount(0)
 
+  // The join extends the session (REFRESH_SESSION_TTL_SECONDS, 30 minutes by
+  // default); the sender's countdown must follow instead of the initial 10.
+  await expect(
+    page
+      .getByText('Session expires in')
+      .locator('xpath=following-sibling::span[1]'),
+  ).toHaveText(/^(29|30)m/, { timeout: 10_000 })
+
   const download = receiver.getByRole('button', { name: 'Download' })
   await expect(download).toBeVisible({ timeout: 20_000 })
   await download.click()

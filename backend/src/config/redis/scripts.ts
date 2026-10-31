@@ -4,13 +4,114 @@ import {
   NO_PEER,
   NO_SESSION,
   SESSION_FIELDS,
+  SHORT_CODE_ACTIVE_KEY,
   peerStorageKey,
   sessionStorageKey,
+  shortCodeStorageKey,
 } from "./constants.js";
 import { redisClient } from "./index.js";
 
 const F = SESSION_FIELDS;
 const P = KEY_PREFIXES;
+
+/**
+ * Atomically reserve one candidate short code.
+ *
+ * KEYS[1] active-code sorted set, KEYS[2] candidate code key
+ * ARGV[1] code, ARGV[2] sessionId, ARGV[3] TTL seconds,
+ * ARGV[4] capacity, ARGV[5] now (ms), ARGV[6] session key prefix
+ *
+ * Expired index entries are pruned first. If the key already exists but its
+ * session is gone, the stale entry is removed and the candidate is reused.
+ *
+ * Returns {'ok'} | {'collision'} | {'capacity'}.
+ */
+export const RESERVE_SHORT_CODE_SCRIPT = `
+local activeKey = KEYS[1]
+local shortKey = KEYS[2]
+local code = ARGV[1]
+local sessionId = ARGV[2]
+local ttl = tonumber(ARGV[3])
+local capacity = tonumber(ARGV[4])
+local now = tonumber(ARGV[5])
+local sessionPrefix = ARGV[6]
+local nowSeconds = math.floor(now / 1000)
+
+redis.call('ZREMRANGEBYSCORE', activeKey, '-inf', nowSeconds)
+if redis.call('ZCARD', activeKey) >= capacity then
+  return {'capacity'}
+end
+
+if redis.call('EXISTS', shortKey) == 1 then
+  local mapped = redis.call('GET', shortKey)
+  if mapped and redis.call('EXISTS', sessionPrefix .. mapped) == 0 then
+    redis.call('DEL', shortKey)
+    redis.call('ZREM', activeKey, code)
+  else
+    return {'collision'}
+  end
+end
+
+redis.call('SET', shortKey, sessionId, 'EX', ttl)
+redis.call('ZADD', activeKey, nowSeconds + ttl, code)
+return {'ok'}
+`;
+
+/**
+ * Release a code only when it still belongs to this session. A code can be
+ * reused after the old session ends, so an unconditional delete would let a
+ * late cleanup remove the new owner's alias.
+ *
+ * KEYS[1] code key, KEYS[2] active-code sorted set
+ * ARGV[1] code, ARGV[2] sessionId
+ */
+export const RELEASE_SHORT_CODE_SCRIPT = `
+local shortKey = KEYS[1]
+local activeKey = KEYS[2]
+local code = ARGV[1]
+local sessionId = ARGV[2]
+
+if redis.call('GET', shortKey) == sessionId then
+  redis.call('DEL', shortKey)
+  redis.call('ZREM', activeKey, code)
+  return {'ok'}
+end
+return {'stale'}
+`;
+
+export type ReserveShortCodeResult = "ok" | "collision" | "capacity";
+
+export const runReserveShortCodeScript = async (params: {
+  code: string;
+  sessionId: string;
+  ttlSeconds: number;
+  capacity: number;
+}): Promise<ReserveShortCodeResult> => {
+  const reply = (await redisClient.eval(RESERVE_SHORT_CODE_SCRIPT, {
+    keys: [SHORT_CODE_ACTIVE_KEY, shortCodeStorageKey(params.code)],
+    arguments: [
+      params.code,
+      params.sessionId,
+      params.ttlSeconds.toString(),
+      params.capacity.toString(),
+      Date.now().toString(),
+      P.session,
+    ],
+  })) as unknown[] | null;
+
+  const status = String(reply?.[0] ?? "collision");
+  return status === "ok" || status === "capacity" ? status : "collision";
+};
+
+export const runReleaseShortCodeScript = async (params: {
+  code: string;
+  sessionId: string;
+}): Promise<void> => {
+  await redisClient.eval(RELEASE_SHORT_CODE_SCRIPT, {
+    keys: [shortCodeStorageKey(params.code), SHORT_CODE_ACTIVE_KEY],
+    arguments: [params.code, params.sessionId],
+  });
+};
 
 /**
  * Atomic join.
@@ -93,6 +194,14 @@ if createdAt ~= nil and maxLifetime > 0 then
 end
 
 if ttl <= 0 then
+  local shortCode = redis.call('HGET', sessionKey, '${F.shortCode}')
+  if shortCode and shortCode ~= '' then
+    local shortKey = '${P.short}' .. shortCode
+    if redis.call('GET', shortKey) == sessionId then
+      redis.call('DEL', shortKey)
+      redis.call('ZREM', '${P.short}active', shortCode)
+    end
+  end
   redis.call('DEL', sessionKey)
   return {'expired'}
 end
@@ -141,6 +250,16 @@ if createdBy and createdBy ~= noPeer then
   redis.call('EXPIRE', peerPrefix .. createdBy, ttl)
 end
 
+-- The short link must live exactly as long as the session it points at.
+local shortCode = redis.call('HGET', sessionKey, '${F.shortCode}')
+if shortCode and shortCode ~= '' then
+  local shortKey = '${P.short}' .. shortCode
+  if redis.call('EXISTS', shortKey) == 1 then
+    redis.call('EXPIRE', shortKey, ttl)
+    redis.call('ZADD', '${P.short}active', math.floor(now / 1000) + ttl, shortCode)
+  end
+end
+
 return {'ok', tostring(connectedPeers), tostring(ttl)}
 `;
 
@@ -181,6 +300,14 @@ local connectedPeer = redis.call('HGET', sessionKey, connectedPeerField)
 
 if createdBy == peerId then
   -- The creator owns the session: it and every member mapping go with them.
+  local shortCode = redis.call('HGET', sessionKey, '${F.shortCode}')
+  if shortCode and shortCode ~= '' then
+    local shortKey = '${P.short}' .. shortCode
+    if redis.call('GET', shortKey) == sessionId then
+      redis.call('DEL', shortKey)
+      redis.call('ZREM', '${P.short}active', shortCode)
+    end
+  end
   redis.call('DEL', sessionKey)
   redis.call('DEL', peerKey)
   if connectedPeer ~= nil and connectedPeer ~= noPeer then
@@ -352,7 +479,8 @@ return {'ok'}
  *
  * KEYS[1] session hash
  * ARGV[1] peerId, ARGV[2] status, ARGV[3] now (ms), ARGV[4] "no file" sentinel,
- * ARGV[5] completed TTL seconds, ARGV[6] max lifetime seconds
+ * ARGV[5] completed TTL seconds, ARGV[6] max lifetime seconds,
+ * ARGV[7] sessionId
  *
  * Returns {status, fileName, ttlSeconds}.
  */
@@ -362,6 +490,7 @@ local peerId = ARGV[1]
 local now = tonumber(ARGV[3])
 local completedTtl = tonumber(ARGV[5])
 local maxLifetime = tonumber(ARGV[6])
+local sessionId = ARGV[7]
 
 if redis.call('EXISTS', sessionKey) == 0 then
   return {'not-found'}
@@ -373,6 +502,16 @@ end
 redis.call('HSET', sessionKey,
   '${F.status}', ARGV[2],
   '${F.lastActivity}', ARGV[3])
+
+-- Sharing is done: release the short code immediately so it can be reused.
+local shortCode = redis.call('HGET', sessionKey, '${F.shortCode}')
+if shortCode and shortCode ~= '' then
+  local shortKey = '${P.short}' .. shortCode
+  if redis.call('GET', shortKey) == sessionId then
+    redis.call('DEL', shortKey)
+    redis.call('ZREM', '${P.short}active', shortCode)
+  end
+end
 
 local fileName = redis.call('HGET', sessionKey, '${F.fileName}')
 if not fileName or fileName == ARGV[4] then
@@ -432,10 +571,7 @@ return {'ok'}
 `;
 
 export type GuardedWriteStatus =
-  | "ok"
-  | "not-found"
-  | "forbidden"
-  | "already-set";
+  "ok" | "not-found" | "forbidden" | "already-set";
 
 const toGuardedStatus = (value: unknown): GuardedWriteStatus => {
   const status = String(value ?? "not-found");
@@ -486,6 +622,7 @@ export const runCompleteTransferScript = async (params: {
       NO_FILE_SELECTED,
       params.completedTtlSeconds.toString(),
       params.maxLifetimeSeconds.toString(),
+      params.sessionId,
     ],
   })) as unknown[] | null;
 

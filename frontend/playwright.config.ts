@@ -52,7 +52,16 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        // Both peers run in one browser on one host. Chromium normally hides
+        // host candidates behind random `.local` mDNS names, and macOS can
+        // refuse to resolve them for the test browser, so ICE never connects.
+        // Real devices fall back to the TURN relay in that case instead.
+        launchOptions: {
+          args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+        },
+      },
     },
   ],
 })

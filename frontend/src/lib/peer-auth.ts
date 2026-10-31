@@ -2,7 +2,8 @@
  * End-to-end checks that don't trust the signaling server.
  *
  * The sender puts a random key in the receive link's fragment
- * (`/receive/<id>#k=<key>`). Browsers never send the fragment to a server, so
+ * (`/1234#k=<key>`, or legacy `/receive/<id>#k=<key>`). Browsers never send
+ * the fragment to a server, so
  * only the two people holding the link know it. With it:
  *
  * - each peer proves it holds the key *and* sees the same DTLS connection

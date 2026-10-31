@@ -20,6 +20,7 @@ export interface RedisSession extends Record<string, string> {
   receiverToken: string;
   createdAt: string;
   lastActivity: string;
+  shortCode: string;
 }
 
 export interface SessionParams {

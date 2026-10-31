@@ -1,4 +1,4 @@
-import { env } from "../env.js";
+import { getSettings } from "../settings.js";
 import { logger } from "../../utils/logger.js";
 import type { ViaServer } from "./types.js";
 
@@ -42,7 +42,7 @@ export const scheduleSessionExpiry = (
   if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) return;
 
   const expiresInMs = Math.round(ttlSeconds * 1000);
-  const warningSeconds = env.sessionExpiryWarningSeconds;
+  const warningSeconds = getSettings().sessions.expiryWarningSeconds;
   const entry: SessionTimers = {};
 
   if (warningSeconds > 0 && ttlSeconds > warningSeconds) {

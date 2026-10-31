@@ -1,7 +1,7 @@
 import cors from "cors";
 import type { CorsOptionsDelegate } from "cors";
 import type { Request } from "express";
-import { isAllowedOrigin } from "../config/env.js";
+import { isAllowedOrigin, isProduction } from "../config/env.js";
 
 /**
  * Built lazily, after the environment has been validated, so the allowlist is
@@ -11,17 +11,23 @@ import { isAllowedOrigin } from "../config/env.js";
  * error, so a foreign origin is blocked by the browser instead of turning into
  * a 500 for a request that is otherwise harmless.
  *
- * No credentials: the API uses no cookies or auth headers, so allowing them
- * would only widen what a permitted origin could do.
+ * No credentials: the admin API uses a bearer token in a header, never a
+ * cookie, so CORS credentials stay disabled.
  */
 export const corsOptions =
   (): CorsOptionsDelegate<Request> => (req, callback) => {
+    const adminRequest = req.path.startsWith("/api/v1/admin");
     callback(null, {
-      origin: isAllowedOrigin(req.header("origin"), req.header("host")),
-      methods: "GET,HEAD",
+      // The admin page is same-origin on its loopback port. It never needs
+      // cross-origin access, so a different origin gets no CORS headers.
+      origin:
+        isProduction() && adminRequest
+          ? false
+          : isAllowedOrigin(req.header("origin"), req.header("host")),
+      methods: "GET,HEAD,POST,PUT",
       preflightContinue: false,
       optionsSuccessStatus: 204,
-      allowedHeaders: ["Content-Type"],
+      allowedHeaders: ["Content-Type", "Authorization"],
     });
   };
 

@@ -1,7 +1,7 @@
 import { ApiError } from "../../utils/api-error.js";
-import { env } from "../env.js";
+import { getSettings } from "../settings.js";
 import { logger } from "../../utils/logger.js";
-import { isSessionId } from "../../utils/validators.js";
+import { isSessionId, isShortCode } from "../../utils/validators.js";
 import {
   MAX_VIOLATIONS,
   RATE_LIMIT_MESSAGE,
@@ -22,6 +22,7 @@ import type {
   GetFileMetadataPayload,
   JoinSessionPayload,
   Level,
+  ResolveSessionPayload,
   SessionIdPayload,
   StoreFileMetadataPayload,
   ViaSocket,
@@ -158,10 +159,11 @@ export const isValidFileMetadata = (metadata: unknown): boolean => {
   if (m.fileName.trim().length === 0) return false;
   if (!isAcceptableFileName(m.fileName)) return false;
 
+  const maxFileSizeBytes = getSettings().limits.maxFileSizeBytes;
   if (
     !Number.isSafeInteger(m.fileSize) ||
     m.fileSize <= 0 ||
-    (env.maxFileSizeBytes > 0 && m.fileSize > env.maxFileSizeBytes)
+    (maxFileSizeBytes > 0 && m.fileSize > maxFileSizeBytes)
   ) {
     return false;
   }
@@ -183,6 +185,15 @@ export const parseSessionPayload = (
     throw new InvalidPayloadError(message);
   }
   return { sessionId: payload.sessionId };
+};
+
+export const parseResolveSessionPayload = (
+  payload: unknown,
+): ResolveSessionPayload => {
+  if (!isRecord(payload) || !isShortCode(payload.shortCode)) {
+    throw new InvalidPayloadError("invalid short code");
+  }
+  return { shortCode: payload.shortCode };
 };
 
 export const parseJoinSessionPayload = (

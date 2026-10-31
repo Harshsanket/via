@@ -23,6 +23,10 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 
+# Persisted admin settings live on a writable volume at /config; the image
+# itself remains read-only.
+RUN mkdir -p /config && chown node:node /config
+
 # Run as the unprivileged user shipped with the image
 USER node
 

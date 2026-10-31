@@ -1,9 +1,11 @@
-name: CI
+name: Frontend
 
 on:
   push:
     branches: [main]
+    paths: ["frontend/**", ".github/workflows/frontend.yml"]
   pull_request:
+    paths: ["frontend/**", ".github/workflows/frontend.yml"]
 
 permissions:
   contents: read
@@ -16,16 +18,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci

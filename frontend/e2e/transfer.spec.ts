@@ -78,9 +78,75 @@ async function createSendLink(page: Page, name: string, buffer: Buffer) {
   await expect(page.getByRole('button', { name: 'Link Copied' })).toBeVisible()
 
   const receiveUrl = await page.evaluate(() => navigator.clipboard.readText())
-  // The link carries the key in its fragment, never sent to the server.
-  expect(receiveUrl).toMatch(/\/receive\/[A-Za-z0-9_-]+#k=[A-Za-z0-9_-]{22}$/)
+  // The short link carries the key in its fragment, never sent to the server.
+  expect(receiveUrl).toMatch(/\/[a-z0-9]{4,6}#k=[A-Za-z0-9_-]{22}$/)
   return receiveUrl
+}
+
+/** Makes the sender's first peer connection report "failed" before the transfer. */
+async function failFirstPeerConnection(page: Page) {
+  await page.addInitScript(() => {
+    const Original = window.RTCPeerConnection
+    let created = 0
+
+    // @ts-expect-error test shim around the browser constructor
+    window.RTCPeerConnection = class extends Original {
+      constructor(config?: RTCConfiguration) {
+        super(config)
+        created += 1
+        if (created !== 1) return
+
+        const setLocalDescription = this.setLocalDescription.bind(this)
+        Object.defineProperty(this, 'setLocalDescription', {
+          configurable: true,
+          value: async (description: RTCSessionDescriptionInit) => {
+            await setLocalDescription(description)
+            Object.defineProperty(this, 'connectionState', {
+              configurable: true,
+              get: () => 'failed',
+            })
+            this.dispatchEvent(new Event('connectionstatechange'))
+          },
+        })
+      }
+    }
+  })
+}
+
+/**
+ * Makes every sender peer connection report "connected" and then "failed"
+ * before the transfer. Relay-only with no relay server means the real channel
+ * can never open, so the retry budget cannot be reset by a real verification.
+ */
+async function failEveryPeerConnection(page: Page) {
+  await page.addInitScript(() => {
+    const Original = window.RTCPeerConnection
+
+    // @ts-expect-error test shim around the browser constructor
+    window.RTCPeerConnection = class extends Original {
+      constructor(config?: RTCConfiguration) {
+        super({ ...config, iceTransportPolicy: 'relay', iceServers: [] })
+
+        let state: RTCPeerConnectionState = 'new'
+        Object.defineProperty(this, 'connectionState', {
+          configurable: true,
+          get: () => state,
+        })
+
+        const setLocalDescription = this.setLocalDescription.bind(this)
+        Object.defineProperty(this, 'setLocalDescription', {
+          configurable: true,
+          value: async (description: RTCSessionDescriptionInit) => {
+            await setLocalDescription(description)
+            state = 'connected'
+            this.dispatchEvent(new Event('connectionstatechange'))
+            state = 'failed'
+            this.dispatchEvent(new Event('connectionstatechange'))
+          },
+        })
+      }
+    }
+  })
 }
 
 async function openReceiver(
@@ -129,12 +195,92 @@ test('receiver download starts the sender and saves the verified file', async ({
   ).toBeVisible({ timeout: 20_000 })
 })
 
-test('refuses to receive when the browser reports too little storage', async ({
+test('retries the first connection instead of failing the session', async ({
   page,
   context,
 }) => {
   await installDirectSaveMock(context)
+  await failFirstPeerConnection(page)
+
+  const payload = Buffer.alloc(512 * 1024)
+  for (let index = 0; index < payload.length; index += 1) {
+    payload[index] = (index * 13) % 251
+  }
+
+  const receiveUrl = await createSendLink(
+    page,
+    'first-connection.bin',
+    payload,
+  )
+  const receiver = await openReceiver(
+    context,
+    receiveUrl,
+    'first-connection.bin',
+  )
+
+  await downloadFile(receiver)
+
+  await expect(
+    receiver.getByText('Saved directly to your chosen location'),
+  ).toBeVisible({ timeout: 45_000 })
+  expect((await readSavedFile(receiver)).equals(payload)).toBe(true)
+})
+
+test('recovers when both first connections fail', async ({ page, context }) => {
+  await installDirectSaveMock(context)
+  await failFirstPeerConnection(page)
+
+  const payload = Buffer.alloc(256 * 1024)
+  for (let index = 0; index < payload.length; index += 1) {
+    payload[index] = (index * 7) % 251
+  }
+
+  const receiveUrl = await createSendLink(page, 'both-first.bin', payload)
+
+  const receiver = await context.newPage()
+  await failFirstPeerConnection(receiver)
+  await receiver.goto(receiveUrl)
+  await expect(receiver.getByText('both-first.bin').first()).toBeVisible({
+    timeout: 20_000,
+  })
+
+  await downloadFile(receiver)
+
+  await expect(
+    receiver.getByText('Saved directly to your chosen location'),
+  ).toBeVisible({ timeout: 45_000 })
+  expect((await readSavedFile(receiver)).equals(payload)).toBe(true)
+})
+
+test('gives up after the retry budget instead of looping', async ({
+  page,
+  context,
+}) => {
+  await installDirectSaveMock(context)
+  await failEveryPeerConnection(page)
+
+  const receiveUrl = await createSendLink(page, 'retry-loop.bin', Buffer.alloc(1024))
+  const receiver = await context.newPage()
+  await receiver.goto(receiveUrl)
+
+  // Three failed attempts (the first plus MAX_RECOVERY_ATTEMPTS) must end in
+  // the error card; a connect-then-fail flap must not reset the budget.
+  await expect(page.getByText(/Could not connect directly/)).toBeVisible({
+    timeout: 15_000,
+  })
+})
+
+test('refuses to receive when the browser reports too little storage', async ({
+  page,
+  context,
+}) => {
+  // The quota only limits temporary storage; a file saved through the
+  // picker goes to disk, so this test needs a browser without one.
   await context.addInitScript(() => {
+    Object.defineProperty(window, 'showSaveFilePicker', {
+      configurable: true,
+      value: undefined,
+    })
     try {
       Object.defineProperty(navigator.storage, 'estimate', {
         configurable: true,
@@ -277,7 +423,9 @@ test('someone with the session id but not the key never gets the file', async ({
   await impostor.goto(forged)
 
   // The encrypted file details stay unreadable to the impostor...
-  await expect(impostor.getByText("couldn't be decrypted")).toBeVisible({
+  await expect(
+    impostor.getByRole('alert').getByText("couldn't be decrypted"),
+  ).toBeVisible({
     timeout: 20_000,
   })
   await expect(impostor.getByText('private.txt')).toHaveCount(0)
@@ -296,6 +444,29 @@ test('someone with the session id but not the key never gets the file', async ({
   expect(downloads).toHaveLength(0)
 })
 
+test('pasting a short link keeps the URL short and joins', async ({
+  page,
+  context,
+}) => {
+  const receiveUrl = await createSendLink(
+    page,
+    'paste-short.bin',
+    Buffer.from('paste the short link'),
+  )
+  const receiver = await context.newPage()
+  await receiver.goto('/receive')
+  await receiver
+    .getByLabel('Via receive link or short code')
+    .fill(receiveUrl)
+  await receiver.getByRole('button', { name: 'Join session' }).click()
+
+  const shortUrl = new URL(receiveUrl)
+  await expect(receiver).toHaveURL(`${shortUrl.origin}${shortUrl.pathname}${shortUrl.hash}`)
+  await expect(receiver.getByText('paste-short.bin').first()).toBeVisible({
+    timeout: 20_000,
+  })
+})
+
 test('receiver cancel returns to the key entry screen', async ({
   page,
   context,
@@ -312,7 +483,9 @@ test('receiver cancel returns to the key entry screen', async ({
 
   await receiver.getByRole('button', { name: 'Cancel' }).click()
 
-  await expect(receiver.getByText('Enter your session key')).toBeVisible()
+  await expect(
+    receiver.getByText('Paste the Via link', { exact: true }),
+  ).toBeVisible()
   await expect(receiver.getByText('Something went wrong')).toHaveCount(0)
 })
 

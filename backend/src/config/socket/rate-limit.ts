@@ -1,4 +1,5 @@
 import { env } from "../env.js";
+import { getSettings } from "../settings.js";
 import type { ViaSocket } from "./types.js";
 
 /**
@@ -50,8 +51,45 @@ export class TokenBucket {
   }
 }
 
-export const createEventLimiter = (event: string): TokenBucket =>
-  new TokenBucket(EVENT_LIMITS[event] ?? DEFAULT_LIMIT);
+export const createEventLimiter = (event: string): TokenBucket => {
+  // Short-code lookups are governed by the per-IP window below, which is
+  // configurable. Keep the per-socket layer effectively out of the way.
+  if (event === "resolve-session") {
+    return new TokenBucket({ capacity: 1_000, refillPerSecond: 1_000 });
+  }
+  return new TokenBucket(EVENT_LIMITS[event] ?? DEFAULT_LIMIT);
+};
+
+/**
+ * Short-code lookups are also capped per IP, not only per socket, so opening
+ * fresh sockets does not reset the guess budget. The limit is 15 per minute
+ * by default and is configurable from the admin page.
+ */
+interface ShortCodeAttemptWindow {
+  count: number;
+  resetAt: number;
+}
+
+const SHORT_CODE_WINDOW_MS = 60_000;
+const shortCodeAttempts = new Map<string, ShortCodeAttemptWindow>();
+
+export const takeShortCodeAttempt = (ip: string): boolean => {
+  const now = Date.now();
+  const limit = getSettings().limits.shortCodeAttemptsPerMinute;
+  const current = shortCodeAttempts.get(ip);
+
+  if (!current || now >= current.resetAt) {
+    shortCodeAttempts.set(ip, {
+      count: 1,
+      resetAt: now + SHORT_CODE_WINDOW_MS,
+    });
+    return true;
+  }
+
+  if (current.count >= limit) return false;
+  current.count += 1;
+  return true;
+};
 
 const violations = new WeakMap<ViaSocket, number>();
 
@@ -154,7 +192,7 @@ export const getClientIp = (socket: ViaSocket): string => {
 const socketsPerIp = new Map<string, number>();
 
 export const isOverConnectionCap = (ip: string): boolean =>
-  (socketsPerIp.get(ip) ?? 0) >= env.maxSocketsPerIp;
+  (socketsPerIp.get(ip) ?? 0) >= getSettings().limits.maxSocketsPerIp;
 
 export const trackConnection = (ip: string): void => {
   socketsPerIp.set(ip, (socketsPerIp.get(ip) ?? 0) + 1);

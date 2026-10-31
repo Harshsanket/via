@@ -32,6 +32,10 @@ export type JoinSessionPayload = SessionIdPayload & {
   receiverToken?: string;
 };
 
+export interface ResolveSessionPayload {
+  shortCode: string;
+}
+
 export interface StoreFileMetadataPayload {
   sessionId: string;
   fileName: string;
@@ -53,16 +57,16 @@ export interface ErrorResponse {
 export type AckResponse = { success: boolean; message?: string };
 
 export type CreateSessionResponse =
-  | { success: true; sessionId: string }
-  | ErrorResponse;
+  { success: true; sessionId: string; shortCode: string } | ErrorResponse;
 
 export type JoinSessionResponse =
-  | { success: true; metadata: FileMetaData | null }
-  | ErrorResponse;
+  { success: true; metadata: FileMetaData | null } | ErrorResponse;
+
+export type ResolveSessionResponse =
+  { success: true; sessionId: string } | ErrorResponse;
 
 export type TransferResponse =
-  | { success: true; message: string }
-  | ErrorResponse;
+  { success: true; message: string } | ErrorResponse;
 
 export interface FileMetadataPayload {
   sessionId: string;
@@ -85,6 +89,10 @@ export type Ack<T> = (response: T) => void;
 
 export interface ClientToServerEvents {
   "create-session": (ack: Ack<CreateSessionResponse>) => void;
+  "resolve-session": (
+    payload: ResolveSessionPayload,
+    ack: Ack<ResolveSessionResponse>,
+  ) => void;
   "join-session": (
     payload: JoinSessionPayload,
     ack: Ack<JoinSessionResponse>,

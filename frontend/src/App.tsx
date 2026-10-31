@@ -1,5 +1,5 @@
 import { lazy, Suspense, type ReactNode } from 'react'
-import { Route, Routes } from 'react-router-dom'
+import { Route, Routes, useParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 
 import AuroraBackground from './components/AuroraBackground'
@@ -8,7 +8,9 @@ import Footer from './components/Footer'
 import Header from './components/Header'
 
 import { socketConfigError } from './lib/env'
+import { isValidShortCode } from './lib/validation'
 
+const ConfigPage = lazy(() => import('./pages/config/ConfigPage'))
 const Home = lazy(() => import('./pages/Home'))
 const NotFound = lazy(() => import('./pages/NotFound'))
 const ReceivePage = lazy(() => import('./pages/receive/Receive'))
@@ -53,7 +55,7 @@ function Layout({ children }: { children: ReactNode }) {
       <main
         id="main-content"
         tabIndex={-1}
-        className="flex w-full flex-1 flex-col items-center px-4 pb-28 pt-6 focus:outline-none sm:px-6 sm:pb-20"
+        className="flex w-full flex-1 flex-col items-center px-4 pb-10 pt-6 focus:outline-none sm:px-6"
       >
         {children}
       </main>
@@ -62,19 +64,47 @@ function Layout({ children }: { children: ReactNode }) {
   )
 }
 
+function ShortLinkRoute() {
+  const { shortCode } = useParams<{ shortCode: string }>()
+  if (!shortCode || !isValidShortCode(shortCode)) return <NotFound />
+  return <ReceivePage />
+}
+
+function AppRoutes() {
+  return (
+    <Suspense fallback={<RouteFallback />}>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/send" element={<SendPage />} />
+        <Route path="/receive/:sessionId" element={<ReceivePage />} />
+        <Route path="/receive" element={<ReceivePage />} />
+        <Route path="/:shortCode" element={<ShortLinkRoute />} />
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </Suspense>
+  )
+}
+
 function App() {
   return (
-    <Layout>
-      <Suspense fallback={<RouteFallback />}>
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/send" element={<SendPage />} />
-          <Route path="/receive/:sessionId" element={<ReceivePage />} />
-          <Route path="/receive" element={<ReceivePage />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </Suspense>
-    </Layout>
+    <Routes>
+      <Route
+        path="/config"
+        element={
+          <Suspense fallback={<RouteFallback />}>
+            <ConfigPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="*"
+        element={
+          <Layout>
+            <AppRoutes />
+          </Layout>
+        }
+      />
+    </Routes>
   )
 }
 

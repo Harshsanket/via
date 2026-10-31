@@ -17,19 +17,19 @@ test('shows the via. header away from the home page', async ({ page }) => {
   await expect(header.getByRole('link')).toHaveText('via.')
 })
 
-test('validates a receive session key', async ({ page }) => {
+test('validates a receive link or short code', async ({ page }) => {
   await page.goto('/receive')
-  await page.getByLabel('Session key or receive link').fill('bad')
+  await page.getByLabel('Via receive link or short code').fill('bad')
   await page.getByRole('button', { name: 'Join session' }).click()
   const alert = page.getByRole('alert')
-  await expect(alert).toContainText('Paste the receive link the sender shared.')
+  await expect(alert).toContainText('Paste the Via receive link or short code.')
   await expect(alert).toBeFocused()
 })
 
 test('refuses a link without its security key', async ({ page }) => {
   await page.goto('/receive')
   await page
-    .getByLabel('Session key or receive link')
+    .getByLabel('Via receive link or short code')
     .fill('http://127.0.0.1:4173/receive/abcd1234-not-keyed')
   await page.getByRole('button', { name: 'Join session' }).click()
   await expect(page.getByRole('alert')).toContainText('missing its security key')

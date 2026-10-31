@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  parseCreateSessionResponse,
   parseDescriptionEvent,
   parseFileMetadataEvent,
   parseIceCandidateEvent,
   parseJoinSessionResponse,
+  parseResolveSessionResponse,
   parseSessionErrorEvent,
   parseSessionExpiringEvent,
   parseSessionTtl,
@@ -45,6 +47,34 @@ describe('server event parsers', () => {
     expect(parseFileMetadataEvent({ success: true, metadata })).toEqual({
       success: true,
       metadata,
+    })
+  })
+
+  it('checks created sessions and short-link lookups', () => {
+    expect(
+      parseCreateSessionResponse({
+        success: true,
+        sessionId: 'abcd1234',
+        shortCode: '4821',
+      }),
+    ).toEqual({
+      success: true,
+      sessionId: 'abcd1234',
+      shortCode: '4821',
+    })
+    expect(
+      parseCreateSessionResponse({
+        success: true,
+        sessionId: 'abcd1234',
+        shortCode: 'bad code',
+      }),
+    ).toBeNull()
+    expect(
+      parseResolveSessionResponse({ success: true, sessionId: 'abcd1234' }),
+    ).toEqual({ success: true, sessionId: 'abcd1234' })
+    expect(parseResolveSessionResponse({ success: false, message: 'expired' })).toEqual({
+      success: false,
+      message: 'expired',
     })
   })
 

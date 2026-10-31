@@ -314,6 +314,16 @@ curl -sk --resolve via-home.duckdns.org:443:192.168.1.50 \
 Then open the site on a phone or another computer on the same Wi-Fi and run a
 small transfer.
 
+The admin console is host-only:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/config   # 200
+curl -s -o /dev/null -w '%{http_code}\n' https://via-home.duckdns.org/config  # 404
+```
+
+Open `http://127.0.0.1:8081/config` on the host and sign in with
+`admin` / `admin`; change the password before saving any other setting.
+
 ### 4.5 Caddy and TLS
 
 Caddy is the only service exposed to the LAN on 80 and 443. It:
@@ -379,8 +389,8 @@ memory and process limits.
 | Service | Image | Runs as | Networks | Ports | Purpose |
 |---|---|---|---|---|---|
 | `caddy` | Caddy 2.10 + DuckDNS plugin | root, `NET_BIND_SERVICE` only | `edge` | 80, 443 | TLS, redirect, reverse proxy |
-| `web` | nginx-unprivileged 1.29 + frontend build | uid 101 | `edge`, `app` | internal 8080 | Serves the SPA, proxies `/api` and `/socket.io` |
-| `api` | Node 24, production dependencies | uid 1000 | `app`, `data` | internal 3000 | Express + Socket.IO signaling |
+| `web` | nginx-unprivileged 1.29 + frontend build | uid 101 | `edge`, `app` | internal 8080; host loopback 8081 | Serves the SPA, proxies `/api` and `/socket.io`; admin console on loopback |
+| `api` | Node 24, production dependencies | uid 1000 | `app`, `data` | internal 3000 | Express + Socket.IO signaling and admin API |
 | `redis` | Redis 7.4 | uid 999 | `data` | internal 6379 | Session store, password required, no persistence |
 | `coturn` | coturn 4.6 | uid 65534, `NET_BIND_SERVICE` only | `edge` | 3478, 49300–49340 | Fallback relay |
 | `ddns` | Alpine 3.20 | uid 65534 | `default` | — | Needs outbound internet to update DuckDNS hourly |
@@ -404,9 +414,10 @@ one client.
 |---|---|
 | `caddy_data` | Certificate and ACME account |
 | `caddy_config` | Caddy's runtime configuration |
+| `settings` | Admin settings and password hash for the host-only config page |
 
-There is no application data to back up: sessions are short-lived and Redis
-does not write to disk.
+Sessions are short-lived and Redis does not write to disk. Back up `settings`
+if you want to keep the admin credentials and runtime overrides.
 
 **Frontend proxy**
 
@@ -415,6 +426,8 @@ does not write to disk.
 - `/api/` → `http://api:3000`
 - `/socket.io/` → `http://api:3000` with WebSocket upgrade
 - `/healthz` → local `200 ok`
+- `/config` and `/api/v1/admin/*` → served only on the loopback listener
+  `127.0.0.1:8081`; the public site returns 404 for both
 
 It also sets the security headers, including the Content-Security-Policy. The
 CSP allows connections only to the page's own origin (`connect-src 'self'
@@ -442,6 +455,15 @@ values.
 | `STUN_URLS` | `stun:${VIA_HOST}:3478` | Keeps STUN discovery local |
 | `TURN_URLS` | `turn:${VIA_HOST}:3478?transport=udp,turn:${VIA_HOST}:3478?transport=tcp` | Points at coturn |
 | `TURN_SECRET` | `${TURN_SECRET}` | Matches coturn's shared secret |
+| `SETTINGS_PATH` | `/config/settings.json` | Persisted admin settings, mounted on the `settings` volume |
+
+The session lifetimes, limits and STUN/TURN URL values above are starting
+defaults. The host-only admin page at `http://127.0.0.1:8081/config` overrides
+them in `/config/settings.json`; changes apply to new sessions and sockets.
+Only the host can reach that port, and the public site returns 404 for
+`/config`. The default admin account is `admin` / `admin`; change it on first
+sign-in. Secrets such as `TURN_SECRET`, the Redis password and the DuckDNS
+token remain in `.env` and are never returned to the browser.
 
 **Optional backend variables**
 

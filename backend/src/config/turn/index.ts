@@ -1,5 +1,6 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { env } from "../env.js";
+import { getSettings } from "../settings.js";
 import { ApiError } from "../../utils/api-error.js";
 import type {
   IceServer,
@@ -28,14 +29,17 @@ const isTurnUrl = (url: string): boolean =>
 const isStunUrl = (url: string): boolean =>
   /^stuns?:/i.test(url) && url.length > "stun:".length;
 
-/**
- * Validated once at import so startup logging, the configuration check and
- * credential minting can never disagree about which URLs are usable.
- */
-const turnUrls = env.turnUrls.filter(isTurnUrl);
-const stunUrls = env.stunUrls.filter(isStunUrl);
-const rejectedTurnUrls = env.turnUrls.filter((url) => !isTurnUrl(url));
-const rejectedStunUrls = env.stunUrls.filter((url) => !isStunUrl(url));
+const networkSettings = () => {
+  const { stunUrls, turnUrls, turnCredentialTtlSeconds } =
+    getSettings().network;
+  return {
+    turnUrls: turnUrls.filter(isTurnUrl),
+    stunUrls: stunUrls.filter(isStunUrl),
+    rejectedTurnUrls: turnUrls.filter((url) => !isTurnUrl(url)),
+    rejectedStunUrls: stunUrls.filter((url) => !isStunUrl(url)),
+    ttlSeconds: turnCredentialTtlSeconds,
+  };
+};
 
 /**
  * A relay needs both halves. A URL without a secret (or the reverse) is
@@ -43,7 +47,7 @@ const rejectedStunUrls = env.stunUrls.filter((url) => !isStunUrl(url));
  * credentials that no relay would ever accept.
  */
 export const isTurnConfigured = (): boolean =>
-  turnUrls.length > 0 && env.turnSecret.length > 0;
+  networkSettings().turnUrls.length > 0 && env.turnSecret.length > 0;
 
 /**
  * Reports the relay configuration once at boot. A missing relay is a warning
@@ -51,6 +55,9 @@ export const isTurnConfigured = (): boolean =>
  * on a LAN without one, but it must not pass unnoticed either.
  */
 export const logTurnConfiguration = (): void => {
+  const { turnUrls, rejectedTurnUrls, rejectedStunUrls, ttlSeconds } =
+    networkSettings();
+
   if (rejectedTurnUrls.length > 0) {
     logTurn(
       "error",
@@ -84,7 +91,7 @@ export const logTurnConfiguration = (): void => {
 
   logTurn("success", "logTurnConfiguration", "RELAY CONFIGURED", {
     turnUrls,
-    ttlSeconds: env.turnCredentialTtlSeconds,
+    ttlSeconds,
     algorithm: env.turnCredentialAlgorithm,
     secret: describeSecret(env.turnSecret),
   });
@@ -99,6 +106,8 @@ export const mintIceServers = ({
   suffix = randomUUID(),
   now = Date.now(),
 }: { suffix?: string; now?: number } = {}): MintedIceServers => {
+  const { turnUrls, stunUrls, ttlSeconds } = networkSettings();
+
   if (!isTurnConfigured()) {
     logTurn("error", "mintIceServers", "REFUSED :: no relay is configured", {
       turnUrls: turnUrls.length,
@@ -107,7 +116,7 @@ export const mintIceServers = ({
     throw new ApiError(503, "relay is not configured");
   }
 
-  const expiresAt = Math.floor(now / 1000) + env.turnCredentialTtlSeconds;
+  const expiresAt = Math.floor(now / 1000) + ttlSeconds;
   const username = `${expiresAt}:${suffix}`;
   const credential = signTurnCredential(
     username,
@@ -131,7 +140,7 @@ export const mintIceServers = ({
 
   return {
     iceServers,
-    ttlSeconds: env.turnCredentialTtlSeconds,
+    ttlSeconds,
     expiresAt,
     algorithm: env.turnCredentialAlgorithm,
   };

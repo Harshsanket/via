@@ -2,9 +2,14 @@ import { Socket } from 'socket.io-client'
 import {
   parseCreateSessionResponse,
   parseJoinSessionResponse,
+  parseResolveSessionResponse,
 } from '../lib/server-events'
 import { guardAck } from './guard'
-import type { CreateSessionResponse, JoinSessionResponse } from './Types'
+import type {
+  CreateSessionResponse,
+  JoinSessionResponse,
+  ResolveSessionResponse,
+} from './Types'
 
 const INVALID_RESPONSE = {
   success: false,
@@ -22,6 +27,22 @@ export const createSession = (
   socket.emit(
     'create-session',
     guardAck(parseCreateSessionResponse, INVALID_RESPONSE, callback),
+  )
+}
+
+/**
+ * Emit "resolve-session" — turns a short link code into the real session UUID.
+ * The UUID is used only internally by the receiver; the URL stays short.
+ */
+export const resolveSession = (
+  socket: Socket,
+  shortCode: string,
+  callback: (response: ResolveSessionResponse) => void,
+): void => {
+  socket.emit(
+    'resolve-session',
+    { shortCode },
+    guardAck(parseResolveSessionResponse, INVALID_RESPONSE, callback),
   )
 }
 

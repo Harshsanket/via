@@ -15,6 +15,7 @@
 #                 (TLS)        (nginx +     (signaling)    (sessions)
 #                               frontend)
 #   LAN ──3478─▶ coturn ◀──────── edge (fallback relay only)
+#   host only ──8081──▶ web (admin console; bound to 127.0.0.1)
 #
 # `app` and `data` are internal networks with no route out, so api and redis
 # can't reach the internet, and redis is reachable from api alone.
@@ -67,6 +68,9 @@ services:
         VITE_API_BASE_URL: ""
     volumes:
       - ./docker/web.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    # The admin console is reachable only from this host's loopback.
+    ports:
+      - "127.0.0.1:8081:8081"
     tmpfs: [/tmp, /var/cache/nginx, /var/run]
     networks: [edge, app]
     mem_limit: 64m
@@ -89,7 +93,9 @@ services:
       CLIENT_ORIGIN: https://${VIA_HOST}
       # Only nginx (the other member of `app`) may report client IPs.
       TRUSTED_PROXIES: 172.30.1.0/24
-      # Session lifetimes come from .env so they can be tuned without a rebuild.
+      # These are the defaults; the host-only admin page persists overrides in
+      # /config/settings.json.
+      SETTINGS_PATH: /config/settings.json
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-600}
       REFRESH_SESSION_TTL_SECONDS: ${REFRESH_SESSION_TTL_SECONDS:-1800}
       SESSION_MAX_LIFETIME_SECONDS: ${SESSION_MAX_LIFETIME_SECONDS:-86400}
@@ -101,6 +107,8 @@ services:
       STUN_URLS: "stun:${VIA_HOST:?set VIA_HOST in .env}:3478"
       TURN_URLS: "turn:${VIA_HOST}:3478?transport=udp,turn:${VIA_HOST}:3478?transport=tcp"
       TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET in .env}
+    volumes:
+      - settings:/config
     tmpfs: [/tmp]
     networks: [app, data]
     mem_limit: 256m
@@ -246,3 +254,4 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  settings:

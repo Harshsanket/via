@@ -68,6 +68,28 @@ test("create-session floods are throttled", async () => {
   await settle();
 });
 
+test("short-code lookups are limited to 15 per minute per IP", async () => {
+  const socket = await connectOk({ "x-real-ip": "192.168.0.99" });
+
+  const acks = [];
+  for (let i = 0; i < 16; i += 1) {
+    acks.push(await emitAck(socket, "resolve-session", { shortCode: "zzzz" }));
+  }
+
+  assert.equal(acks[0]?.success, false);
+  assert.ok(
+    acks.some(
+      (ack) =>
+        ack?.message === "too many attempts, try again in a minute" ||
+        ack?.message === "too many requests",
+    ),
+    "the sixteenth lookup from one IP must be refused",
+  );
+
+  socket.disconnect();
+  await settle();
+});
+
 test("ICE candidate floods are throttled", async () => {
   const socket = await connectOk();
   const sessionId = await createSession(socket);

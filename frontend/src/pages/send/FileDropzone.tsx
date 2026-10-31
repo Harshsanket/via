@@ -52,8 +52,8 @@ export default function FileDropzone({ onFile }: FileDropzoneProps) {
         aria-label="Choose a file to send"
         className={`h-72 w-full cursor-pointer rounded-2xl border-2 border-dashed p-6 text-center backdrop-blur-sm transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2E8B73] focus-visible:ring-offset-2 sm:h-80 sm:p-10 ${
           isDragOver
-            ? 'scale-[1.01] border-indigo-400 bg-indigo-500/10 shadow-xl'
-            : 'border-white/20 shadow-lg hover:border-white/40 hover:bg-white/5'
+            ? 'scale-[1.01] border-[#2E8B73] bg-[#2E8B73]/10 shadow-xl'
+            : 'border-white/20 bg-white/5 shadow-lg hover:border-white/40 hover:bg-white/10'
         }`}
         onDragOver={handleDragOver}
         onDragEnter={handleDragOver}
@@ -63,9 +63,9 @@ export default function FileDropzone({ onFile }: FileDropzoneProps) {
         onKeyDown={handleKeyDown}
       >
         <span className="pointer-events-none flex h-full flex-col items-center justify-center">
-          <span className="mb-5 rounded-full bg-linear-to-br from-indigo-500/20 to-purple-500/20 p-5 sm:mb-6 sm:p-6">
+          <span className="mb-5 rounded-full bg-[#2E8B73]/15 p-5 sm:mb-6 sm:p-6">
             <Upload
-              className="h-14 w-14 text-indigo-300 sm:h-20 sm:w-20"
+              className="h-14 w-14 text-[#5fc4a8] sm:h-20 sm:w-20"
               aria-hidden="true"
             />
           </span>
@@ -74,6 +74,9 @@ export default function FileDropzone({ onFile }: FileDropzoneProps) {
           </span>
           <span className="text-sm font-light sm:text-base">
             or click to browse from your device
+          </span>
+          <span className="mt-4 text-xs text-muted-foreground">
+            Any file type. It goes directly to the receiver.
           </span>
         </span>
       </button>
