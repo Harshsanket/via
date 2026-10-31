@@ -213,7 +213,7 @@ services:
   # answers with a private address). Re-asserted hourly in case it is changed.
   ddns:
     <<: *hardened
-    image: alpine:3.20
+    image: alpine:3.24
     user: "65534:65534"
     environment:
       LAN_IP: ${LAN_IP:?set LAN_IP in .env (or run ./scripts/start.sh)}
