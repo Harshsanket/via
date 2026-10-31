@@ -1,6 +1,6 @@
 {
   "name": "via",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Signaling server for VIA, a browser-to-browser file sharing app",
   "main": "dist/src/server.js",
   "scripts": {

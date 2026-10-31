@@ -29,6 +29,50 @@ const isTurnUrl = (url: string): boolean =>
 const isStunUrl = (url: string): boolean =>
   /^stuns?:/i.test(url) && url.length > "stun:".length;
 
+/**
+ * A TURN server answers STUN on the same port, so a `stun:` entry that points
+ * at a configured relay is redundant and shows up as a second "coturn" line in
+ * the browser's ICE logs. Reduce both schemes to the same key so one can be
+ * dropped. TLS and plaintext endpoints are kept apart.
+ */
+const relayEndpoint = (url: string): string | null => {
+  const match = /^(turns?|stuns?):(.+)$/i.exec(url.trim());
+  if (!match) return null;
+
+  const scheme = match[1].toLowerCase();
+  const secure = scheme === "turns" || scheme === "stuns";
+  const authority = match[2].split("?")[0].split("/")[0].trim();
+  if (!authority) return null;
+
+  const defaultPort = secure ? "5349" : "3478";
+  const ipv6 = /^\[([^\]]+)\](?::(\d+))?$/.exec(authority);
+  if (ipv6) {
+    return `${secure ? "tls" : "plain"}|[${ipv6[1].toLowerCase()}]:${ipv6[2] ?? defaultPort}`;
+  }
+
+  const hostPort = /^([^:]+)(?::(\d+))?$/.exec(authority);
+  if (!hostPort) return null;
+
+  return `${secure ? "tls" : "plain"}|${hostPort[1].toLowerCase()}:${hostPort[2] ?? defaultPort}`;
+};
+
+/** Drops STUN entries that a TURN URL already covers on the same endpoint. */
+const withoutRelayDuplicates = (
+  stunUrls: string[],
+  turnUrls: string[],
+): string[] => {
+  const relayed = new Set(
+    turnUrls
+      .map(relayEndpoint)
+      .filter((endpoint): endpoint is string => endpoint !== null),
+  );
+
+  return stunUrls.filter((url) => {
+    const endpoint = relayEndpoint(url);
+    return endpoint === null || !relayed.has(endpoint);
+  });
+};
+
 const networkSettings = () => {
   const { stunUrls, turnUrls, turnCredentialTtlSeconds } =
     getSettings().network;
@@ -125,11 +169,13 @@ export const mintIceServers = ({
   );
 
   // STUN first: a direct path is the outcome to aim for, and the relay is the
-  // fallback. Both are offered so ICE can gather candidates for each.
+  // fallback. Both are offered so ICE can gather candidates for each, except
+  // when the configured STUN server is the relay itself.
   const iceServers: IceServer[] = [];
+  const distinctStunUrls = withoutRelayDuplicates(stunUrls, turnUrls);
 
-  if (stunUrls.length > 0) {
-    iceServers.push({ urls: stunUrls });
+  if (distinctStunUrls.length > 0) {
+    iceServers.push({ urls: distinctStunUrls });
   }
 
   iceServers.push({

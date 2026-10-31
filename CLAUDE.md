@@ -16,13 +16,13 @@ A self-hosted, browser-to-browser file sharing app for one home network. The **f
 via/                      ← project root: ONE git repo (github.com/Harshsanket/via)
 ├── .github/              ← CI (backend.yml, frontend.yml) and Dependabot; GitHub reads only this one
 ├── README.md, CLAUDE.md, LICENSE (GPL-3.0-only; same text in backend/ and frontend/)
-├── docker-compose.yml    ← the supported deployment (split, hardened stack)
+├── docker-compose.yml    ← the supported deployment (one hardened container)
 ├── .env / .env.example   ← secrets live in .env (never commit, never print)
-├── Dockerfile            ← legacy single-container image (unused by compose)
+├── Dockerfile            ← the single image (Caddy, nginx, API, Redis, coturn)
 ├── docker/
-│   ├── Caddyfile, caddy/Dockerfile   ← TLS edge + DuckDNS DNS-01 plugin
-│   ├── web.nginx.conf                ← nginx for the `web` service (USED)
-│   ├── nginx.conf, entrypoint.sh     ← single-container variant only
+│   ├── Caddyfile           ← TLS edge + DuckDNS DNS-01 plugin
+│   ├── web.nginx.conf      ← nginx: SPA, proxy, admin listener
+│   ├── entrypoint.sh       ← starts and supervises every process
 ├── backend/              ← signaling server (Express + Socket.IO + Redis)
 ├── frontend/             ← React app (Vite)
 └── docs-internal/        ← LOCAL-ONLY agent records; never commit, publish or upload
@@ -64,7 +64,7 @@ cp .env.example .env        # fill DUCKDNS_*, VIA_HOST, REDIS_PASSWORD (and TURN
 ./scripts/start.sh          # detects LAN_IP, updates .env, then compose up -d --build
 ```
 ```bash
-docker compose ps           # all healthy; caddy/ddns show "Up"
+docker compose ps           # via should show "Up (healthy)"
 ```
 
 The live instance is `https://hs-via.duckdns.org` → the host's LAN IP (currently `192.168.0.104`; `scripts/start.sh` detects it). From the host, `curl --resolve hs-via.duckdns.org:443:192.168.0.104 …` bypasses local DNS. The owner's Mac uses Mullvad DNS, which doesn't resolve the name.
@@ -174,24 +174,18 @@ The Playwright config launches Chromium with `--disable-features=WebRtcHideLocal
 
 ### Deployment (easy to break, hard to notice)
 
-- **Pinned subnets are referenced elsewhere.** Change them together:
-
-  | Network | Subnet | Referenced by |
-  |---|---|---|
-  | `edge` | `172.30.0.0/24` | `set_real_ip_from` in `docker/web.nginx.conf` |
-  | `app` | `172.30.1.0/24` | `TRUSTED_PROXIES` for `api` |
-
-  Get these wrong and the per-IP limits either trust spoofed headers or lump every client together.
-- **`caddy` and `coturn` need `cap_add: [NET_BIND_SERVICE]`.** Their binaries carry that file capability, and with `cap_drop: ALL` alone they won't exec.
+- **Everything runs in one container.** Caddy, nginx, the API, Redis, coturn and the DuckDNS loop share its loopback. `docker-compose.yml` defines only the `via` service; don't add sidecars back without a decision record.
+- **Only `NET_BIND_SERVICE` is kept.** With `cap_drop: ALL` alone Caddy cannot bind 80/443. The container stays read-only, with tmpfs for nginx, Redis, coturn and Caddy's writable state.
+- **nginx trusts only loopback** (`set_real_ip_from 127.0.0.1/32`), because Caddy runs beside it. The API's default `TRUSTED_PROXIES` is loopback too.
 - **Caddy's DNS-01 resolvers are `9.9.9.9 8.8.8.8`.** `1.1.1.1` is refused on the owner's network, and switching back breaks certificate renewal there.
-- **`redis` runs as `user: "999:1000"`** with a read-only root and a tmpfs `/data`. Its health check authenticates through `REDISCLI_AUTH`. The `api`'s `REDIS_URL` embeds `REDIS_PASSWORD`.
-- **`app` and `data` are `internal: true`.** The API has no internet access. If you add a feature that needs it (external STUN, error reporting), that's a design decision; don't just make the network external.
+- **Redis runs as root inside the container** (the image has no separate user), on loopback, with a password and no persistence. The API's `REDIS_URL` embeds `REDIS_PASSWORD`.
+- **The container has internet access** for DuckDNS and ACME. The API shares the container's loopback, so nothing on the LAN reaches it except through nginx. If you add an external endpoint, review the CSP and the threat model.
 - **CSP `connect-src 'self' wss://$host`.** Any new external endpoint needs a CSP change in `docker/web.nginx.conf`.
-- **`LAN_IP` is detected by `scripts/start.sh`**, which rewrites that one line in `.env` and then runs Compose. The `ddns` container re-asserts the DuckDNS record hourly, but only for the address it started with: rerun the script (or `docker compose up -d` after editing `.env`) when the host changes networks. `VIA_LAN_IP` overrides detection.
-- **`coturn` is the fallback relay, not the default path.** It is on `edge`, publishes 3478 (TCP/UDP) and UDP 49300-49340, and advertises `LAN_IP` via `--external-ip`. Its `denied-peer-ip` rules must keep it out of `172.16.0.0/12` (Docker networks) and `192.168.65.0/24` (Docker Desktop's NAT), plus loopback and link-local. `api` and `coturn` share `TURN_SECRET`; never expose that value to a client. Removing the relay is fine for same-LAN use, but phone↔computer transfers fail where AP isolation or blocked mDNS prevents a direct path.
+- **`LAN_IP` is detected by `scripts/start.sh`**, which rewrites that one line in `.env` and then runs Compose. The DuckDNS loop in `docker/entrypoint.sh` re-asserts the record hourly, but only for the address the container started with: rerun the script (or `docker compose up -d` after editing `.env`) when the host changes networks. `VIA_LAN_IP` overrides detection.
+- **`coturn` is the fallback relay, not the default path.** It publishes 3478 (TCP/UDP) and UDP 49300-49340, and advertises `LAN_IP` via `--external-ip`. Its `denied-peer-ip` rules must keep it out of `172.16.0.0/12` (Docker networks) and `192.168.65.0/24` (Docker Desktop's NAT), plus loopback and link-local. The API and coturn share `TURN_SECRET`; never expose that value to a client. Removing the relay is fine for same-LAN use, but phone↔computer transfers fail where AP isolation or blocked mDNS prevents a direct path.
 - **Docker Desktop on macOS shows clients as `192.168.65.1`,** so the per-IP limits effectively apply per household. Size them for that.
 - **Never forward router ports, and never print, commit or upload `.env`.** It holds the DuckDNS token and the Redis password.
-- **The admin console is loopback-only.** `web` publishes `127.0.0.1:8081:8081`; the public 8080 server returns 404 for `/config` and `/api/v1/admin/*`; the admin listener sets `X-Via-Admin: 1`, and the public listener clears it. The API refuses admin routes without that marker in production. Do not add a public route or Caddy proxy to 8081.
+- **The admin console is loopback-only.** The container publishes `127.0.0.1:8081:8081`; the public 8080 server returns 404 for `/config` and `/api/v1/admin/*`; the admin listener sets `X-Via-Admin: 1`, and the public listener clears it. The API refuses admin routes without that marker in production. Do not add a public route or Caddy proxy to 8081.
 - **Admin settings live in the `settings` volume** (`SETTINGS_PATH=/config/settings.json`). It contains the admin password hash and token secret. Never serve it, log it, or put it in the image. The default account is `admin` / `admin` with a forced change.
 - **Dynamic short codes are settings-driven.** The default is four numeric digits (10,000 codes); the admin page can switch to 4–6 lowercase alphanumeric codes. Generation excludes reserved paths (`send`, `config`, `assets`, etc.). `resolve-session` must keep accepting every previously issued shape, and release paths must compare `short:<code>` to the UUID before deleting.
 - **The Caddy volumes `caddy_data` and `caddy_config` hold the certificate.** Don't delete them casually: Let's Encrypt rate-limits repeated issuance.
@@ -254,30 +248,25 @@ R=(--resolve hs-via.duckdns.org:443:$(grep '^LAN_IP=' .env | cut -d= -f2)); U=ht
 | CSP sent | `curl -sI "${R[@]}" "$U/" \| grep -i content-security` | `connect-src 'self' wss://…` |
 | No credentials header | `curl -sD - -o /dev/null -H "Origin: $U" "${R[@]}" "$U/api/v1/health" \| grep -i allow-credentials` | prints nothing |
 | Rate limit | `for i in $(seq 80); do curl -s -o /dev/null -w '%{http_code} ' "${R[@]}" "$U/api/v1/health" & done; wait` | some `429` |
-| Spoofed IP ignored | `curl -s -o /dev/null -H 'X-Forwarded-For: 6.6.6.6' "${R[@]}" "$U/api/v1/health"`, then `docker compose logs web` | no `6.6.6.6` in the log |
+| Spoofed IP ignored | `curl -s -o /dev/null -H 'X-Forwarded-For: 6.6.6.6' "${R[@]}" "$U/api/v1/health"`, then `docker compose logs via` | no `6.6.6.6` in the log |
 | Admin page is loopback-only | `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/config` | `200` |
 | Admin page absent from public site | `curl -s -o /dev/null -w '%{http_code}\n' "${R[@]}" "$U/config"` | `404` |
 | Admin API absent from public site | `curl -s -o /dev/null -w '%{http_code}\n' "${R[@]}" "$U/api/v1/admin/settings"` | `404` |
 
-Container isolation, expected to fail or be refused in each case:
+Container hardening, expected to fail or be refused in each case:
 
 ```bash
-docker compose exec web sh -c 'nc -z -w2 redis 6379'
+docker compose exec via sh -c 'wget -q -T3 -O- https://example.com'
 ```
 ```bash
-docker compose exec caddy sh -c 'nc -z -w2 api 3000'
+docker compose exec via redis-cli -a wrong --no-auth-warning ping
 ```
 ```bash
-docker compose exec api sh -c 'wget -q -T3 -O- https://example.com'
-```
-```bash
-docker compose exec redis redis-cli -a wrong --no-auth-warning ping
-```
-```bash
-docker compose exec api touch /app/x
+docker compose exec via touch /app/x
 ```
 
-The last one should fail with a read-only filesystem error.
+The last one should fail with a read-only filesystem error. The API still needs
+outbound internet for DuckDNS/ACME, so the wget check is informational now.
 
 ### Threat model: questions to keep asking
 
@@ -294,7 +283,7 @@ For deeper review, use the `/security-review` skill, or `/code-review` for corre
 ## 7. Definition of done
 
 - Everything in the automated list in section 6 passes, and you've reported the actual output.
-- If the deployment changed: `docker compose config --quiet`, then `up -d --build`, then every service healthy, then the manual checks above.
+- If the deployment changed: `docker compose config --quiet`, then `up -d --build`, then the `via` container healthy, then the manual checks above.
 - `progress.md` has an entry: what changed, which checks ran with their results, what's unverified.
 - Nothing is committed or pushed unless the owner asked. If they asked, nothing of theirs was swept into your commit.
 
@@ -303,8 +292,8 @@ For deeper review, use the `/security-review` skill, or `/code-review` for corre
 ## 8. Known gaps (open)
 
 - No transfer has been tested on a real phone since the hardening; do one, and compare the security codes on both screens.
-- Caddy runs as root inside its container (only `NET_BIND_SERVICE` kept).
+- Caddy, nginx, the API, Redis and coturn share one container and run as root; only `NET_BIND_SERVICE` is kept.
 - `disconnecting` emits `peer-left` during a recoverable blip, so the sender's screen may reset briefly.
 - When the receiver's security check fails first, the sender sees "The receiver could not complete the transfer" instead of the security message.
 - The server still sees file sizes (no padding).
-- The legacy single-container files (`Dockerfile`, `docker/entrypoint.sh`, `docker/nginx.conf`) aren't covered by CI.
+- The single-container `Dockerfile` is not built in CI; the backend and frontend images still are.

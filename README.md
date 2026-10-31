@@ -2,7 +2,7 @@
 
 Private, browser-to-browser file sharing for your home network.
 
-**Version 1.1.0** · [Setup guide](SETUP.md) · [Features](FEATURES.md) · [Release notes](CHANGELOG.md) · [GPL-3.0-only](LICENSE)
+**Version 1.2.0** · [Setup guide](SETUP.md) · [Features](FEATURES.md) · [Release notes](CHANGELOG.md) · [GPL-3.0-only](LICENSE)
 
 ---
 
@@ -18,7 +18,7 @@ You run Via yourself, in Docker, on one computer that stays on. Everyone at home
 - **End-to-end verification:** each share link carries a secret key that the server never sees. Both browsers prove to each other that they hold it before any data moves, and both screens show the same 6-digit security code.
 - **A server that knows little:** it only introduces the two devices. File names are encrypted before it stores them.
 - **Home-only:** nothing is opened on your router, so the site doesn't exist outside your network.
-- **Locked-down containers:** each part runs isolated, read-only, with no extra privileges and, apart from Caddy, as a non-root user.
+- **A locked-down container:** the whole app runs in one read-only container with no extra privileges beyond binding the web ports.
 
 The project has three parts:
 
@@ -26,7 +26,17 @@ The project has three parts:
 |---|---|
 | `frontend/` | React + Vite single-page app: the send and receive pages, WebRTC transfer, and end-to-end checks |
 | `backend/` | Node.js + Express + Socket.IO signaling server, with Redis for short-lived sessions |
-| `docker/`, `docker-compose.yml` | The home-network deployment: Caddy (HTTPS), nginx, the API, Redis, coturn and a DuckDNS updater |
+| `docker/`, `docker-compose.yml` | The home-network deployment: one container running Caddy (HTTPS), nginx, the API, Redis, coturn and a DuckDNS updater |
+
+---
+
+## What's new in 1.2.0
+
+- **One container, one service.** Caddy, nginx, the API, Redis, coturn and the DuckDNS loop now ship in a single image; `docker-compose.yml` defines one `via` service.
+- **coturn is offered once.** A `stun:` URL that points at a configured relay is dropped from ICE, and the deployment lists only TURN URLs.
+- **Hardening retained:** read-only filesystem, dropped capabilities, loopback-only admin console, password-protected Redis.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ---
 
@@ -105,7 +115,7 @@ short version.
 
    ```bash
    ./scripts/start.sh
-   docker compose logs -f caddy   # wait for "certificate obtained successfully"
+   docker compose logs -f via     # wait for "certificate obtained successfully"
    ```
 
 5. **Use it.** On any phone or laptop **on the same Wi‑Fi**, open
@@ -131,7 +141,7 @@ All settings live in one of five places:
 |---|---|---|
 | Root `.env` | Deployment secrets, DuckDNS, LAN IP, default session lifetimes | [SETUP.md §4.3](SETUP.md#43-configure-the-root-env) |
 | Host-only admin page | Short-link mode/length, session TTLs, limits, STUN/TURN URLs, admin credentials | Open `http://127.0.0.1:8081/config` on the host |
-| `docker-compose.yml` | Backend runtime defaults, networks, volumes, hardening | [SETUP.md §4.6–4.7](SETUP.md#46-the-compose-stack) |
+| `docker-compose.yml` | Runtime defaults, ports, volumes, hardening | [SETUP.md §4.6–4.7](SETUP.md#46-the-compose-stack) |
 | `backend/.env` | Backend behavior for local development | [SETUP.md §4.9](SETUP.md#49-local-development) |
 | `frontend/.env` / build args | `VITE_*` values baked into the frontend | [SETUP.md §4.8](SETUP.md#48-frontend-build-configuration) |
 
@@ -155,9 +165,9 @@ other setting can be saved. Admin settings persist in the `settings` Docker
 volume; secrets such as `TURN_SECRET`, the Redis password and the DuckDNS token
 stay in `.env` and are never shown in the browser.
 
-The full variable tables — backend runtime, frontend build args, session
-lifetimes, TURN credentials and the legacy single-container variables — are in
-[SETUP.md §4.7–4.10](SETUP.md#47-backend-runtime-configuration).
+The full variable tables — container runtime, frontend build args, session
+lifetimes and TURN credentials — are in
+[SETUP.md §4.7](SETUP.md#47-backend-runtime-configuration).
 
 ---
 
@@ -200,17 +210,20 @@ Anyone outside who looks up the name gets a private IP that leads nowhere.
 - **Verification:** before anything else is accepted on the data channel, each side sends an HMAC that only the key holder can compute. It covers both sides' DTLS certificate fingerprints, so if anything relayed a substituted connection, the values don't match and the transfer stops.
 - **Transfer:** the file is sent in chunks with back-pressure. The receiver checks a CRC32 at the end. Chrome/Edge write straight to the file you pick; Safari/Firefox store it temporarily (OPFS, or memory as a last resort) and offer it as a download. Interrupted transfers resume from the last confirmed byte.
 
-### The containers
+### The container
 
 ```
- LAN ──443──▶ caddy ──edge──▶ web ──app──▶ api ──data──▶ redis
-              (TLS)         (nginx +     (signaling)    (sessions)
-                             frontend)          │
- LAN ──3478──▶ coturn ◀──── edge ───────────────┘
+ LAN ──443──▶ caddy ──▶ nginx ──▶ api ──▶ redis
+              (TLS)    (frontend)  (signaling)
+ LAN ──3478──▶ coturn
               (fallback relay; the API only mints its credentials)
 ```
 
-`app` and `data` are internal networks with no route out: the API and Redis can't reach the internet, and only the API can reach Redis. coturn is only the fallback when two LAN devices cannot connect directly; a small `ddns` container keeps the DuckDNS name pointed at your home IP.
+All of these processes share one container and talk over its loopback. Only
+Caddy (80/443), coturn (3478 and the relay range) and the loopback-only admin
+listener (127.0.0.1:8081) are published. A small loop in the entrypoint keeps
+the DuckDNS name pointed at your home IP. coturn answers STUN on its TURN port,
+so the ICE response lists it once.
 
 ---
 
@@ -220,8 +233,8 @@ Anyone outside who looks up the name gets a private IP that leads nowhere.
 
 ```bash
 ./scripts/start.sh                 # detect LAN_IP, build, start
-docker compose ps                  # every service should be "healthy" or "Up"
-docker compose logs -f api         # or caddy, web, redis, coturn, ddns
+docker compose ps                  # the container should be "healthy"
+docker compose logs -f via         # all processes log to this stream
 docker compose down                # stop; keeps the certificate volumes
 ```
 
@@ -230,20 +243,20 @@ one. There's no data to back up: sessions are temporary and Redis doesn't write
 to disk. For updates, network changes, secret rotation and backups, see the
 [operations runbook](SETUP.md#operations).
 
-### Services
+### Processes in the container
 
-| Service | Image | Runs as | Notes |
-|---|---|---|---|
-| `caddy` | Caddy 2.10 + DuckDNS plugin | root, with only `NET_BIND_SERVICE` | Publishes 80 and 443; renews the certificate automatically |
-| `web` | nginx-unprivileged + the built frontend | uid 101 | Serves the app and proxies `/api` and `/socket.io` to `api` |
-| `api` | Node 24 (production dependencies only) | uid 1000 | Signaling server, no internet access |
-| `redis` | Redis 7.4 | uid 999 | Password required, no persistence, internal network only |
-| `coturn` | coturn 4.6 | uid 65534, with only `NET_BIND_SERVICE` | Fallback relay for direct-connection failures; cannot reach the Docker networks, loopback or link-local space |
-| `ddns` | Alpine | uid 65534 | Re-pins the DuckDNS record to `LAN_IP` every hour |
+| Process | Notes |
+|---|---|
+| Caddy 2.10 + DuckDNS plugin | Publishes 80 and 443; renews the certificate automatically |
+| nginx + the built frontend | Serves the app and proxies `/api` and `/socket.io` to the API on loopback |
+| Node 24 API | Signaling server, production dependencies only |
+| Redis 7.4 | Password required, no persistence |
+| coturn 4.6 | Fallback relay for direct-connection failures; cannot reach loopback or link-local space |
+| DuckDNS loop | Re-pins the DuckDNS record to `LAN_IP` every hour |
 
-Every service has a read-only filesystem, can't gain privileges, and has memory
-and process limits; all but caddy and coturn drop every Linux capability. The
-full topology, subnets and volumes are in
+The container has a read-only filesystem, can't gain privileges, and has memory
+and process limits. It keeps only `NET_BIND_SERVICE` so Caddy can bind 80 and
+443. The full runtime layout is in
 [SETUP.md §4.6](SETUP.md#46-the-compose-stack).
 
 ### Host computer settings
@@ -256,14 +269,11 @@ full topology, subnets and volumes are in
 - **Don't forward any ports** on your router. Via is designed to stay inside
   your home network.
 
-### Single-container variant
+### One image, one container
 
-The root `Dockerfile` (with `docker/entrypoint.sh` and `docker/nginx.conf`)
-builds everything into one image, with an optional coturn relay
-(`TURN_ENABLED=true`). `docker-compose.yml` doesn't use it, and it does not
-include Caddy. The split stack above is the supported, hardened deployment. See
-[SETUP.md §4.10](SETUP.md#410-single-container-variant) for its variables and
-run command.
+The root `Dockerfile` builds everything into one image and
+`docker/entrypoint.sh` starts the processes. `docker-compose.yml` runs that
+image as a single `via` service; there are no sidecar containers.
 
 ---
 
@@ -273,8 +283,8 @@ run command.
 |---|---|
 | The name resolves on mobile data but not on Wi‑Fi | Your router has **DNS rebinding protection**, which blocks public names that point at home IPs. Add `duckdns.org` to its exceptions, or use a public DNS server on the device |
 | A device uses a privacy DNS or VPN (Mullvad, NextDNS, AdGuard, Pi-hole…) and the name doesn't resolve | Many of these block answers that point at home IPs. Allow the name in that service, or turn the filter off on your home network |
-| Devices can't reach each other or the host | Turn off **AP / client isolation** on the Wi‑Fi, then check `docker compose ps coturn` and the TURN ports |
-| Caddy's log shows DNS or ACME errors | Check `DUCKDNS_TOKEN` and `DUCKDNS_DOMAIN` in `.env`, then run `docker compose restart caddy` |
+| Devices can't reach each other or the host | Turn off **AP / client isolation** on the Wi‑Fi, then check `docker compose ps` and the TURN ports in the logs |
+| Caddy's log shows DNS or ACME errors | Check `DUCKDNS_TOKEN` and `DUCKDNS_DOMAIN` in `.env`, then run `docker compose restart via` |
 | The site stopped working after the router rebooted | The host got a new IP. Run `./scripts/start.sh`; add a DHCP reservation |
 | "too many requests" or HTTP 429 | A client sent far more than normal use. Wait and retry. On Docker Desktop, every device may appear as one address, so limits are shared per household |
 
@@ -338,7 +348,7 @@ The project includes CI workflows (`.github/workflows/backend.yml`, `frontend.ym
   - HSTS;
   - no cross-site cookies or credentials;
   - foreign origins are refused, including for WebSocket connections.
-- **The deployment is isolated:** separate least-privilege containers, internal networks, a password-protected Redis with no persistence, and nothing exposed past your router.
+- **The deployment is isolated:** one read-only container with no extra privileges, a password-protected Redis with no persistence, and nothing exposed past your router.
 
 **Reporting a vulnerability:** please don't open a public issue. Contact the maintainer privately, with steps to reproduce.
 

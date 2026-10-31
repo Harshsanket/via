@@ -48,10 +48,9 @@ public internet. Caddy holds a real Let's Encrypt certificate for it, so
 browsers show a normal lock icon with no warnings.
 
 ```text
-LAN ──443──▶ caddy ──edge──▶ web ──app──▶ api ──data──▶ redis
-              (TLS)         (nginx +     (signaling)    (sessions)
-                             frontend)
-LAN ──3478──▶ coturn ◀──── edge
+LAN ──443──▶ caddy ──▶ nginx ──▶ api ──▶ redis
+              (TLS)    (frontend)  (signaling)
+LAN ──3478──▶ coturn
               (fallback relay; the API mints short-lived credentials)
 ```
 
@@ -62,10 +61,11 @@ server only pairs the two browsers and stores short-lived session metadata.
 
 | Port | Protocol | Service | Purpose |
 |---|---|---|---|
-| 80 | TCP | `caddy` | Redirects HTTP to HTTPS |
-| 443 | TCP + UDP | `caddy` | The app over HTTPS/HTTP3 |
-| 3478 | TCP + UDP | `coturn` | STUN/TURN fallback relay |
-| 49300–49340 | UDP | `coturn` | Relay media range |
+| 80 | TCP | Caddy | Redirects HTTP to HTTPS |
+| 443 | TCP + UDP | Caddy | The app over HTTPS/HTTP3 |
+| 3478 | TCP + UDP | coturn | STUN/TURN fallback relay |
+| 49300–49340 | UDP | coturn | Relay media range |
+| 8081 | TCP (loopback only) | nginx | Host-only admin console |
 
 Docker publishes these directly. **Do not forward them on your router**; the
 site is meant to exist only inside your home network.
@@ -118,7 +118,7 @@ cp .env.example .env
 Then watch the certificate being issued:
 
 ```bash
-docker compose logs -f caddy
+docker compose logs -f via
 ```
 
 Wait for `certificate obtained successfully`, then open
@@ -130,7 +130,7 @@ Check the stack:
 docker compose ps
 ```
 
-`caddy` and `ddns` should show `Up`; the others should show `Up (healthy)`.
+The `via` container should show `Up (healthy)`.
 
 If anything fails, continue with the detailed steps below.
 
@@ -284,7 +284,7 @@ What the script does:
 The first build takes a few minutes. Watch the certificate:
 
 ```bash
-docker compose logs -f caddy
+docker compose logs -f via
 ```
 
 Success looks like `certificate obtained successfully`. Press Ctrl+C.
@@ -326,20 +326,21 @@ Open `http://127.0.0.1:8081/config` on the host and sign in with
 
 ### 4.5 Caddy and TLS
 
-Caddy is the only service exposed to the LAN on 80 and 443. It:
+Caddy is the only web process exposed to the LAN on 80 and 443. It:
 
 - obtains and renews a Let's Encrypt certificate;
 - redirects `http://` to `https://`;
-- reverse-proxies everything to `web:8080`.
+- reverse-proxies everything to nginx on `127.0.0.1:8080`.
 
 **How the certificate works without an open port**
 
 Caddy uses the **DNS-01** challenge: it writes a TXT record through the DuckDNS
 API, and Let's Encrypt checks public DNS. Nothing on the router needs to be
-forwarded. The custom image adds the DuckDNS plugin:
+forwarded. The root `Dockerfile` builds Caddy with the DuckDNS plugin in its
+first stage:
 
 ```dockerfile
-FROM caddy:2.10-builder AS build
+FROM caddy:2.10-builder AS caddy-build
 RUN xcaddy build --with github.com/caddy-dns/duckdns
 ```
 
@@ -351,7 +352,7 @@ The relevant Caddyfile:
 		dns duckdns {env.DUCKDNS_TOKEN}
 		resolvers 9.9.9.9 8.8.8.8
 	}
-	reverse_proxy web:8080
+	reverse_proxy 127.0.0.1:8080
 }
 
 http://:80 {
@@ -370,7 +371,7 @@ http://:80 {
 
 ```bash
 docker compose logs caddy
-docker compose restart caddy
+docker compose restart via
 ```
 
 Check:
@@ -380,33 +381,25 @@ Check:
 - The host can reach DuckDNS and the ACME directory over HTTPS.
 - The certificate volumes still exist.
 
-### 4.6 The Compose stack
+### 4.6 The container
 
-`docker-compose.yml` defines six services. Each one is read-only, drops every
-Linux capability except where noted, disallows privilege escalation, and has
-memory and process limits.
+`docker-compose.yml` defines one service, `via`. It builds the root
+`Dockerfile` and starts every process through `docker/entrypoint.sh`. The
+container is read-only, drops every Linux capability except `NET_BIND_SERVICE`
+(needed by Caddy), disallows privilege escalation, and has memory and process
+limits.
 
-| Service | Image | Runs as | Networks | Ports | Purpose |
-|---|---|---|---|---|---|
-| `caddy` | Caddy 2.10 + DuckDNS plugin | root, `NET_BIND_SERVICE` only | `edge` | 80, 443 | TLS, redirect, reverse proxy |
-| `web` | nginx-unprivileged 1.29 + frontend build | uid 101 | `edge`, `app` | internal 8080; host loopback 8081 | Serves the SPA, proxies `/api` and `/socket.io`; admin console on loopback |
-| `api` | Node 24, production dependencies | uid 1000 | `app`, `data` | internal 3000 | Express + Socket.IO signaling and admin API |
-| `redis` | Redis 7.4 | uid 999 | `data` | internal 6379 | Session store, password required, no persistence |
-| `coturn` | coturn 4.6 | uid 65534, `NET_BIND_SERVICE` only | `edge` | 3478, 49300–49340 | Fallback relay |
-| `ddns` | Alpine 3.20 | uid 65534 | `default` | — | Needs outbound internet to update DuckDNS hourly |
+| Process | Ports | Purpose |
+|---|---|---|
+| Caddy 2.10 + DuckDNS plugin | 80, 443 | TLS, redirect, reverse proxy |
+| nginx + frontend build | internal 8080; host loopback 8081 | Serves the SPA, proxies `/api` and `/socket.io`; admin console on loopback |
+| Node 24 API | internal 3000 | Express + Socket.IO signaling and admin API |
+| Redis 7.4 | internal 6379 | Session store, password required, no persistence |
+| coturn 4.6 | 3478, 49300–49340 | Fallback relay |
+| DuckDNS loop | — | Re-pins the record to `LAN_IP` hourly |
 
-**Networks**
-
-| Network | Subnet | Members | Notes |
-|---|---|---|---|
-| `edge` | `172.30.0.0/24` | caddy, web, coturn | Caddy needs internet access for certificates |
-| `app` | `172.30.1.0/24` | web, api | `internal: true`; referenced by `TRUSTED_PROXIES` |
-| `data` | `172.30.2.0/24` | api, redis | `internal: true`; no route out |
-
-The pinned subnets matter: `docker/web.nginx.conf` trusts `172.30.0.0/24` for
-client IPs, and the API trusts `172.30.1.0/24`. Change them together or the
-per-IP limits will either trust spoofed headers or treat the whole household as
-one client.
+All processes talk over the container's loopback. There are no Docker
+networks, subnets or sidecars to keep in step.
 
 **Volumes**
 
@@ -417,14 +410,15 @@ one client.
 | `settings` | Admin settings and password hash for the host-only config page |
 
 Sessions are short-lived and Redis does not write to disk. Back up `settings`
-if you want to keep the admin credentials and runtime overrides.
+and the two Caddy volumes if you want to keep the admin credentials, runtime
+overrides and certificate.
 
 **Frontend proxy**
 
 `docker/web.nginx.conf` serves the built SPA and proxies:
 
-- `/api/` → `http://api:3000`
-- `/socket.io/` → `http://api:3000` with WebSocket upgrade
+- `/api/` → `http://127.0.0.1:3000`
+- `/socket.io/` → `http://127.0.0.1:3000` with WebSocket upgrade
 - `/healthz` → local `200 ok`
 - `/config` and `/api/v1/admin/*` → served only on the loopback listener
   `127.0.0.1:8081`; the public site returns 404 for both
@@ -444,15 +438,14 @@ values.
 
 | Variable | Value in Compose | Why |
 |---|---|---|
-| `REDIS_URL` | `redis://:<password>@redis:6379` | Connects to the Redis service |
+| `REDIS_URL` | `redis://:<password>@127.0.0.1:6379` (entrypoint) | Connects to loopback Redis |
 | `CLIENT_ORIGIN` | `https://${VIA_HOST}` | Only the site's own origin may connect |
-| `TRUSTED_PROXIES` | `172.30.1.0/24` | Only nginx may report the client IP |
 | `SESSION_TTL_SECONDS` | `${SESSION_TTL_SECONDS:-600}` | From root `.env` |
 | `REFRESH_SESSION_TTL_SECONDS` | `${REFRESH_SESSION_TTL_SECONDS:-1800}` | From root `.env` |
 | `SESSION_MAX_LIFETIME_SECONDS` | `${SESSION_MAX_LIFETIME_SECONDS:-86400}` | From root `.env` |
 | `SESSION_EXPIRY_WARNING_SECONDS` | `${SESSION_EXPIRY_WARNING_SECONDS:-30}` | From root `.env` |
 | `COMPLETED_SESSION_TTL_SECONDS` | `${COMPLETED_SESSION_TTL_SECONDS:-30}` | From root `.env` |
-| `STUN_URLS` | `stun:${VIA_HOST}:3478` | Keeps STUN discovery local |
+| `STUN_URLS` | empty | coturn answers STUN on the TURN port, so it is not listed twice |
 | `TURN_URLS` | `turn:${VIA_HOST}:3478?transport=udp,turn:${VIA_HOST}:3478?transport=tcp` | Points at coturn |
 | `TURN_SECRET` | `${TURN_SECRET}` | Matches coturn's shared secret |
 | `SETTINGS_PATH` | `/config/settings.json` | Persisted admin settings, mounted on the `settings` volume |
@@ -522,8 +515,8 @@ the CSP in `docker/web.nginx.conf`.
 Rebuild after changing build args:
 
 ```bash
-docker compose build web
-docker compose up -d web
+docker compose build via
+docker compose up -d via
 ```
 
 ### 4.9 Local development
@@ -596,60 +589,47 @@ not.
 | `cd frontend && npm run test:e2e:backend` | End-to-end test against a real backend on `127.0.0.1:3000` |
 | `docker compose config --quiet` | Validate the root Compose file and `.env` |
 
-### 4.10 Single-container variant
+### 4.10 One image, one container
 
-The root `Dockerfile`, `docker/entrypoint.sh` and `docker/nginx.conf` build a
-legacy all-in-one image containing nginx, Redis, the API and optionally coturn.
-**It is not used by `docker-compose.yml` and is not the supported deployment.**
-It does not include Caddy, so TLS must be terminated by something in front of
-it.
+The root `Dockerfile` builds the only image. `docker-compose.yml` runs it as the
+`via` service; `docker/entrypoint.sh` starts Caddy, nginx, the API, Redis,
+coturn and the DuckDNS loop. There is no sidecar or legacy variant.
 
-Build:
-
-```bash
-docker build -t via:single .
-```
-
-Run (HTTP on port 80; only enable TURN if you publish its ports):
+Build and run it directly (Compose is still the supported path because it
+interpolates `.env`):
 
 ```bash
+docker build -t via:latest .
 docker run -d --name via \
-  -p 80:80 \
+  --read-only \
+  --cap-drop ALL --cap-add NET_BIND_SERVICE \
+  --security-opt no-new-privileges:true \
+  -p 80:80 -p 443:443 -p 443:443/udp \
   -p 3478:3478 -p 3478:3478/udp \
-  -p 49160-49200:49160-49200/udp \
-  -e TURN_ENABLED=true \
-  -e TURN_HOST=192.168.1.50 \
-  -e EXTERNAL_IP=192.168.1.50 \
-  -e TURN_SECRET=replace-with-a-long-random-value \
-  via:single
+  -p 49300-49340:49300-49340/udp \
+  -p 127.0.0.1:8081:8081 \
+  --env-file .env \
+  -e VIA_HOST -e LAN_IP -e DUCKDNS_DOMAIN -e DUCKDNS_TOKEN \
+  -e REDIS_PASSWORD -e TURN_SECRET \
+  -e CLIENT_ORIGIN="https://$VIA_HOST" \
+  -e STUN_URLS="" \
+  -e TURN_URLS="turn:$VIA_HOST:3478?transport=udp,turn:$VIA_HOST:3478?transport=tcp" \
+  -v via_caddy_data:/caddy-data \
+  -v via_caddy_config:/caddy-config \
+  -v via_settings:/config \
+  --tmpfs /tmp --tmpfs /var/cache/nginx --tmpfs /var/lib/nginx \
+  --tmpfs /var/run --tmpfs /var/lib/coturn --tmpfs /data \
+  via:latest
 ```
-
-Entrypoint variables:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `TURN_ENABLED` | `true` | Set `false` to skip coturn entirely |
-| `TURN_HOST` | `127.0.0.1` | Host used in the TURN URLs |
-| `TURN_URLS` | derived from `TURN_HOST` | Explicit relay URLs |
-| `EXTERNAL_IP` | `TURN_HOST` | Address advertised to clients |
-| `TURN_REALM` | `via` | TURN realm |
-| `TURN_MIN_PORT` / `TURN_MAX_PORT` | `49160` / `49200` | Relay port range |
-| `TURN_SECRET` | generated if unset | Shared secret |
 
 The image accepts `VITE_SOCKET_SERVER_URL`, `VITE_API_BASE_URL` and
-`VITE_ERROR_REPORTING_URL` as **build arguments**. If a TLS reverse proxy fronts
-the container, build with the `https://` URLs and keep port 80 on the private
-network:
+`VITE_ERROR_REPORTING_URL` as **build arguments**. Compose leaves them empty so
+the page talks to its own origin.
 
-```bash
-docker build \
-  --build-arg VITE_SOCKET_SERVER_URL=https://via-home.duckdns.org \
-  --build-arg VITE_API_BASE_URL=https://via-home.duckdns.org/api/v1 \
-  -t via:single .
-```
-
-Prefer the split Compose stack for anything long-lived: it has Caddy, the
-hardened containers, internal networks and the supported update path.
+coturn answers STUN on its TURN port, so the deployment sets `STUN_URLS` empty
+and lists only `TURN_URLS`. The backend also drops a `stun:` entry that points
+at the same endpoint as a `turn:` entry, so it cannot appear twice even after
+an admin changes the network settings.
 
 ---
 
@@ -660,9 +640,9 @@ hardened containers, internal networks and the supported update path.
 ```bash
 ./scripts/start.sh                 # detect LAN IP, rebuild if needed, start
 docker compose ps                  # health and status
-docker compose logs -f api         # or caddy, web, redis, coturn, ddns
+docker compose logs -f via         # all processes log to one stream
 docker compose down                # stop; keeps the certificate volumes
-docker compose down -v             # stop AND delete caddy_data/caddy_config
+docker compose down -v             # stop AND delete the volumes
 ```
 
 Avoid `down -v` unless you intend to discard the certificate. Re-issuing it
@@ -675,7 +655,7 @@ git pull
 ./scripts/start.sh
 ```
 
-The script rebuilds changed images and restarts the stack. Caddy keeps its
+The script rebuilds the image and restarts the container. Caddy keeps its
 certificate.
 
 ### Change networks or the host IP
@@ -696,11 +676,11 @@ change.
 3. Run:
 
    ```bash
-   docker compose up -d caddy ddns api
+   docker compose up -d --build via
    ```
 
-Caddy requests a certificate for the new name, and the API's `CLIENT_ORIGIN`,
-STUN and TURN URLs are recreated from the new `VIA_HOST`. The old record can be
+Caddy requests a certificate for the new name, and the API's `CLIENT_ORIGIN`
+and TURN URLs are recreated from the new `VIA_HOST`. The old record can be
 removed from DuckDNS once you no longer need it.
 
 ### Rotate secrets
@@ -709,37 +689,38 @@ removed from DuckDNS once you no longer need it.
 
 ```bash
 # edit REDIS_PASSWORD in .env
-docker compose up -d redis api
+docker compose up -d --build via
 ```
 
-Redis runs without persistence, so recreating it discards active sessions. That
-is expected; start a new transfer afterwards.
+Redis runs without persistence, so restarting the container discards active
+sessions. That is expected; start a new transfer afterwards.
 
 **TURN secret**
 
 ```bash
 # edit TURN_SECRET in .env
-docker compose up -d coturn api
+docker compose up -d --build via
 ```
 
-Both services must receive the same new value. Existing relay allocations end
-when coturn restarts.
+The same container runs the API and coturn, so both receive the new value.
+Existing relay allocations end when the container restarts.
 
 ### Tune session lifetimes
 
-Edit the `SESSION_*` values in `.env`, then recreate the API:
+Edit the `SESSION_*` values in `.env`, then recreate the container:
 
 ```bash
-docker compose up -d api
+docker compose up -d via
 ```
 
 ### Backups
 
-There is no application data to back up. The only persistent state is the
-Caddy certificate:
+There is no application data to back up. The persistent state is the Caddy
+certificate and the admin settings:
 
 - `caddy_data`
 - `caddy_config`
+- `settings`
 
 `docker compose down` keeps them; `docker compose down -v` deletes them.
 
@@ -762,13 +743,13 @@ up but degraded.
 |---|---|---|
 | The name resolves on mobile data but not on Wi-Fi | Router DNS rebinding protection | Add `duckdns.org` to the router's exceptions, or use a public resolver on the device |
 | The name does not resolve with a privacy DNS or VPN | Mullvad, NextDNS, AdGuard, Pi-hole block private-IP answers | Allow the name in that service, or disable the filter on the home network |
-| Caddy logs show DNS or ACME errors | Wrong token/domain, or DuckDNS unreachable | Check `DUCKDNS_TOKEN` and `DUCKDNS_DOMAIN`, then `docker compose restart caddy` |
+| Caddy logs show DNS or ACME errors | Wrong token/domain, or DuckDNS unreachable | Check `DUCKDNS_TOKEN` and `DUCKDNS_DOMAIN`, then `docker compose restart via` |
 | Caddy keeps requesting certificates | `caddy_data`/`caddy_config` were deleted | Restore the volumes or accept one new issuance; avoid repeated deletions |
 | Site stopped after a router reboot | The host got a new IP | Run `./scripts/start.sh`; add a DHCP reservation |
 | Devices can't reach each other | AP/client isolation on the Wi-Fi | Turn it off, especially on guest networks |
-| Metadata arrives but the file never starts | The direct path failed and TURN is unreachable | Check `docker compose ps coturn` is healthy and ports 3478 + UDP 49300–49340 reach the host |
-| TURN authentication errors | `TURN_SECRET` mismatch | Set the same value for `api` and `coturn`, then recreate both |
-| `503 relay is not configured` | `TURN_URLS`/`TURN_SECRET` empty | Set them in `.env` (Compose does this for the split stack) |
+| Metadata arrives but the file never starts | The direct path failed and TURN is unreachable | Check `docker compose ps` is healthy and ports 3478 + UDP 49300–49340 reach the host |
+| TURN authentication errors | `TURN_SECRET` mismatch | Set it once in `.env`, then recreate the container |
+| `503 relay is not configured` | `TURN_URLS`/`TURN_SECRET` empty | Set them in `.env` (Compose does this for the container) |
 | "This link is missing its security key" | The link was shortened | Share the whole link, including `#k=...` |
 | "Security check failed" | Wrong/edited link, or a man in the middle | Start a new transfer with a fresh link |
 | `429 too many requests` | Per-IP rate limit | Wait and retry. On Docker Desktop, every device may look like one address, so limits are per household |
@@ -786,11 +767,10 @@ up but degraded.
 - [ ] No router ports are forwarded to the host.
 - [ ] `REDIS_PASSWORD` and `TURN_SECRET` are long, random and different.
 - [ ] `CLIENT_ORIGIN` is `https://$VIA_HOST`, not `*`.
-- [ ] `docker compose ps` shows healthy services.
+- [ ] `docker compose ps` shows the container healthy.
 - [ ] The certificate is stored in the Caddy volumes and not deleted casually.
 - [ ] New error-reporting hosts are added to the CSP.
-- [ ] Containers keep their read-only filesystems, dropped capabilities and
-      internal networks.
+- [ ] The container keeps its read-only filesystem and dropped capabilities.
 - [ ] The link key stays in the URL fragment and is never pasted into logs or
       tickets.
 
@@ -804,9 +784,8 @@ up but degraded.
 |---|---|---|---|
 | `.env.example` | Root deployment template | Yes | Copy to `.env`; never commit `.env` |
 | `.env` | Root deployment secrets | No | Gitignored |
-| `docker-compose.yml` | Production stack | Yes | Services, networks, volumes, hardening |
+| `docker-compose.yml` | Production deployment | Yes | One service, ports, volumes, hardening |
 | `docker/Caddyfile` | TLS and reverse proxy | Yes | DuckDNS DNS-01, HTTP redirect |
-| `docker/caddy/Dockerfile` | Caddy + DuckDNS plugin | Yes | Custom image |
 | `docker/web.nginx.conf` | Frontend + proxy | Yes | CSP, HSTS, rate limits, real IP |
 | `scripts/start.sh` | Start helper | Yes | Detects LAN IP, rewrites `.env`, runs Compose |
 | `scripts/detect-lan-ip.sh` | LAN detection | Yes | Physical interfaces and private ranges only |
@@ -819,9 +798,8 @@ up but degraded.
 | `frontend/src/lib/env.ts` | Frontend URL resolution | Yes | Same-origin fallback |
 | `frontend/src/lib/constants.ts` | Frontend limits | Yes | Recovery attempts, chunk size |
 | `frontend/Dockerfile` | Frontend build | Yes | `VITE_*` build args |
-| `Dockerfile` | Legacy single-container build | Yes | Not used by Compose |
-| `docker/entrypoint.sh` | Legacy runtime | Yes | `TURN_*` variables |
-| `docker/nginx.conf` | Legacy nginx config | Yes | Port 80, same security headers |
+| `Dockerfile` | The single-container image | Yes | Caddy, nginx, API, Redis, coturn and DuckDNS in one image |
+| `docker/entrypoint.sh` | Container runtime | Yes | Starts and supervises every process |
 
 ### Master environment reference
 
@@ -848,8 +826,8 @@ up but degraded.
 | `MAX_SOCKETS_PER_IP` | API | No | `20` | Optional |
 | `RECOVERY_WINDOW_SECONDS` | API | No | `120` | Optional |
 | `MAX_FILE_SIZE_BYTES` | API | No | `0` | Optional |
-| `STUN_URLS` | API | No | public Google STUN | Compose |
-| `TURN_URLS` | API | No | unset | Compose |
+| `STUN_URLS` | API | No | empty in Compose (public Google STUN when unset) | Compose |
+| `TURN_URLS` | API | No | `turn:$VIA_HOST:3478` (UDP + TCP) | Compose |
 | `TURN_SECRET` | API + coturn | No | unset | Compose |
 | `TURN_TTL_SECONDS` | API | No | `86400` | Optional |
 | `TURN_CREDENTIAL_ALGORITHM` | API | No | `sha1` | Optional |
@@ -857,11 +835,7 @@ up but degraded.
 | `VITE_API_BASE_URL` | Frontend build | No | derived | Build arg / dev `.env` |
 | `VITE_ERROR_REPORTING_URL` | Frontend build | No | unset | Build arg / dev `.env` |
 | `VITE_MAX_RECOVERY_ATTEMPTS` | Frontend build | No | `2` | Build arg / dev `.env` |
-| `TURN_ENABLED` | Legacy container | No | `true` | `docker run -e` |
-| `TURN_HOST` | Legacy container | No | `127.0.0.1` | `docker run -e` |
-| `EXTERNAL_IP` | Legacy container | No | `TURN_HOST` | `docker run -e` |
-| `TURN_REALM` | Legacy container | No | `via` | `docker run -e` |
-| `TURN_MIN_PORT` / `TURN_MAX_PORT` | Legacy container | No | `49160` / `49200` | `docker run -e` |
+| `TURN_MIN_PORT` / `TURN_MAX_PORT` | coturn | No | `49300` / `49340` | Optional `docker run -e` |
 
 ### Command cheatsheet
 
@@ -872,11 +846,10 @@ cp .env.example .env && chmod 600 .env
 
 # Status and logs
 docker compose ps
-docker compose logs -f caddy
-docker compose logs -f api
+docker compose logs -f via
 
-# Rebuild one service
-docker compose build web && docker compose up -d web
+# Rebuild
+docker compose build via && docker compose up -d via
 
 # Stop (keep certificates) / stop and delete certificates
 docker compose down

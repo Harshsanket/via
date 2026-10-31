@@ -4,6 +4,19 @@ All notable changes to Via are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-31
+
+### Changed
+
+- **The app runs in one container.** Caddy, nginx, the API, Redis, coturn and
+  the DuckDNS loop now share a single image and entrypoint. `docker-compose.yml`
+  defines one `via` service instead of six, so there are no sidecars, Docker
+  networks or per-service addresses to keep in step.
+- **coturn is offered once.** A `stun:` URL that points at a configured `turn:`
+  endpoint is dropped from `/api/v1/ice-servers`, because the relay already
+  answers STUN. The deployment also sets `STUN_URLS` empty and lists only the
+  TURN URLs, so the browser no longer logs two coturn entries.
+
 ## [1.1.0] - 2026-10-31
 
 ### Added
@@ -118,4 +131,5 @@ resumable direct transfers and a fallback relay.
 
 [1.0.0]: https://github.com/Harshsanket/via/releases/tag/v1.0.0
 
+[1.2.0]: https://github.com/Harshsanket/via/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Harshsanket/via/releases/tag/v1.1.0

@@ -16,6 +16,7 @@ import {
 const PORT = Number(process.env.TEST_ICE_PORT ?? 41733);
 const UNCONFIGURED_PORT = PORT + 1;
 const INVALID_URLS_PORT = PORT + 2;
+const SHARED_RELAY_PORT = PORT + 3;
 
 const TURN_SECRET = "via-test-turn-secret";
 const TTL_SECONDS = 3_600;
@@ -33,6 +34,10 @@ let unconfiguredPool;
 let invalidUrlsServer;
 let invalidUrlsBaseUrl;
 let invalidUrlsPool;
+
+let sharedRelayServer;
+let sharedRelayBaseUrl;
+let sharedRelayPool;
 
 const fetchIceServers = async (url, sessionId) => {
   const query =
@@ -76,15 +81,31 @@ before(async () => {
   invalidUrlsServer = invalidUrlsResult.server;
   invalidUrlsBaseUrl = invalidUrlsResult.baseUrl;
   invalidUrlsPool = makeClientPool(invalidUrlsBaseUrl);
+
+  // A coturn deployment answers STUN on the TURN port; both env vars point at
+  // it. The response must list the relay once, not as STUN and TURN.
+  const sharedRelayResult = await startTestServer({
+    port: SHARED_RELAY_PORT,
+    env: {
+      TURN_URLS: TURN_URL,
+      TURN_SECRET,
+      STUN_URLS: "stun:relay.test:3478",
+    },
+  });
+  sharedRelayServer = sharedRelayResult.server;
+  sharedRelayBaseUrl = sharedRelayResult.baseUrl;
+  sharedRelayPool = makeClientPool(sharedRelayBaseUrl);
 });
 
 after(async () => {
   pool?.closeAll();
   unconfiguredPool?.closeAll();
   invalidUrlsPool?.closeAll();
+  sharedRelayPool?.closeAll();
   await stopTestServer(server);
   await stopTestServer(unconfiguredServer);
   await stopTestServer(invalidUrlsServer);
+  await stopTestServer(sharedRelayServer);
 });
 
 test("issues stun and relay entries for a live session", async () => {
@@ -211,6 +232,24 @@ test("a non-turn relay url counts as no relay", async () => {
 
   const { status } = await fetchIceServers(invalidUrlsBaseUrl, sessionId);
   assert.equal(status, 503);
+
+  socket.disconnect();
+});
+
+test("a STUN url on the relay endpoint is listed only once", async () => {
+  const socket = await sharedRelayPool.connect();
+  const sessionId = await createSession(socket);
+
+  const { status, body } = await fetchIceServers(sharedRelayBaseUrl, sessionId);
+
+  assert.equal(status, 200);
+  assert.equal(
+    body.data.iceServers.length,
+    1,
+    "the relay already answers STUN, so no second entry is needed",
+  );
+  assert.deepEqual(body.data.iceServers[0].urls, [TURN_URL]);
+  assert.equal(typeof body.data.iceServers[0].username, "string");
 
   socket.disconnect();
 });
