@@ -34,7 +34,7 @@ services:
   # machine can actually relay through it. Set it to this host's LAN address (or
   # a public one) when testing from another device.
   coturn:
-    image: coturn/coturn:4.6.2-alpine
+    image: coturn/coturn:4.18.0-alpine
     command:
       - --lt-cred-mech
       - --use-auth-secret
