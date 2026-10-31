@@ -40,30 +40,6 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ---
 
-## What's new in 1.1.0
-
-- **Short receive links.** Senders now share a four-digit link such as `https://host/1234#k=…`; the server never sees the key.
-- **Host-only admin console** at `http://127.0.0.1:8081/config` for short-link mode/length, session TTLs, limits and STUN/TURN URLs.
-- **Rebuilt send and receive pages** with a three-step tracker and a unified file card.
-- **Dependencies refreshed** to latest releases; backend dev server runs on `tsx watch`.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full list.
-
----
-
-## What's new in 1.0.0
-
-- **Transfers resume after a dropped connection** and verify the result with a CRC32 checksum, retrying automatically when it does not match.
-- **Direct-to-disk receiving** in Chrome and Edge, with an OPFS or in-memory fallback and a free-space check before the sender starts.
-- **A fallback relay is part of the stack.** coturn handles the rare network where two LAN devices cannot connect directly; files stay DTLS-encrypted end to end.
-- **Automatic LAN detection.** `./scripts/start.sh` finds the host's address, updates `LAN_IP`, and starts Compose, so the DuckDNS record and relay always point at the right place.
-- **Stricter session handling:** role checks for `transfer-start` and `transfer-complete`, receiver-tab reclaim tokens, configurable session lifetimes, and a shortened TTL after completion.
-- **A refreshed interface** with an aurora background, a file-details card, clearer progress, and the shared 6-digit security code.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full list.
-
----
-
 ## Requirements
 
 **To run it at home**
@@ -371,7 +347,9 @@ The project includes CI workflows (`.github/workflows/backend.yml`, `frontend.ym
 
 ## License
 
-Via is free software, licensed under the **GNU General Public License v3.0** (SPDX: `GPL-3.0-only`), for both the frontend and the backend. You may use, study, share and modify it. If you distribute a modified version, you must release it under the same licence. See [`LICENSE`](LICENSE) for the full text (each of `backend/` and `frontend/` carries the same file), or https://www.gnu.org/licenses/gpl-3.0.
+Via is free software, licensed under the **GNU General Public License v3.0** (SPDX: `GPL-3.0-only`). You may use, study, share and modify it. If you distribute a modified version, you must release it under the same licence.
+
+See [`LICENSE`](LICENSE) for the full text.
 
 ---
 
@@ -391,4 +369,4 @@ Built on the shoulders of excellent open-source projects and services: [React](h
 
 ---
 
-<p align="center"><em>a <strong>Harsh Sanket</strong> production</em></p>
+a **Harsh Sanket** production
