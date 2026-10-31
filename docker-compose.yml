@@ -125,7 +125,7 @@ services:
 
   redis:
     <<: *hardened
-    image: redis:7.4-alpine
+    image: redis:8.0-alpine
     # The image's redis user; set directly so the entrypoint never needs root.
     user: "999:1000"
     command:
